@@ -18,8 +18,8 @@ st.set_page_config(
 
 st.title("🔬 Scientific Illustration Animation Studio")
 st.write(
-    "Upload research diagrams, genomics maps, or molecular pathways. Inspect, select, "
-    "and arrange individual elements, text labels, and arrows into professional scientific animation sequences."
+    "Upload research diagrams. Inspect color-coded elements, edit text labels with your "
+    "actual diagram sentences, and organize them into professional animation sequences."
 )
 
 # ============================================================
@@ -42,16 +42,16 @@ if "project_loaded" not in st.session_state:
 
 
 # ============================================================
-# UTILITIES: COLOR CATEGORIZATION & SCIENTIFIC EXTRACTION
+# COLOR CATEGORIZATION & OBJECT EXTRACTION
 # ============================================================
 def classify_color(rgb_color):
-    """Classifies an RGB color tuple into standard scientific palette groups."""
+    """Classifies an RGB color tuple into precise scientific palette groups."""
     r, g, b = int(rgb_color[0]), int(rgb_color[1]), int(rgb_color[2])
     
     if r > 200 and g > 200 and b > 200:
         return "White / Light Gray"
     if r < 50 and g < 50 and b < 50:
-        return "Black / Dark Gray"
+        return "Black / Dark Gray (Non-colored)"
     
     hsv = cv2.cvtColor(np.uint8([[[r, g, b]]]), cv2.COLOR_RGB2HSV)[0][0]
     h, s, v = int(hsv[0]), int(hsv[1]), int(hsv[2])
@@ -59,7 +59,7 @@ def classify_color(rgb_color):
     if s < 40 and v > 50:
         return "White / Light Gray"
     if v < 40:
-        return "Black / Dark Gray"
+        return "Black / Dark Gray (Non-colored)"
 
     if h < 10 or h > 170:
         return "Red"
@@ -107,13 +107,12 @@ def load_image_rgba(uploaded_file):
 
 
 def detect_scientific_objects(img_rgba):
-    """Detects and separates individual scientific objects, arrows, lines, and text regions."""
+    """Detects and separates individual scientific objects, color regions, and non-colored lines/arrows."""
     h, w = img_rgba.shape[:2]
     rgb = img_rgba[:, :, :3]
     alpha = img_rgba[:, :, 3] if img_rgba.shape[2] == 4 else np.full((h, w), 255, dtype=np.uint8)
 
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-
     thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
     if np.any(alpha < 255):
         thresh = cv2.bitwise_and(thresh, alpha)
@@ -151,20 +150,24 @@ def detect_scientific_objects(img_rgba):
 
         aspect_ratio = float(bw) / float(max(1, bh))
         if aspect_ratio > 7.0 or aspect_ratio < 0.14:
-            obj_type = "Straight Line / Arrow"
-        elif bw < 70 and bh < 45 and area < 1200:
-            obj_type = "Text / Label"
+            obj_type = "Non-colored Line / Arrow" if "Black" in color_category or "White" in color_category else "Colored Connector / Arrow"
+        elif bw < 90 and bh < 50 and area < 1500:
+            obj_type = "Text Label / Sentence"
         elif 0.8 < aspect_ratio < 1.2 and area < 2500:
             obj_type = "Circle / Marker"
         else:
-            obj_type = "Rectangle / Shape"
+            obj_type = "Shape / Region"
 
         obj_rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
         mask_crop = sub_mask[y:y+bh, x:x+bw] > 0
         img_crop = img_rgba[y:y+bh, x:x+bw]
         obj_rgba[mask_crop] = img_crop[mask_crop]
 
-        default_name = f"{obj_type.split('/')[0].strip()} {obj_id} ({color_category})"
+        # Meaningful default naming instead of generic numbering
+        if "Text" in obj_type:
+            default_name = f"Label {obj_id} (Edit your text here)"
+        else:
+            default_name = f"{color_category.split(' ')[0]} {obj_type.split('/')[0].strip()} {obj_id}"
 
         detected_objects.append({
             "id": f"obj_{obj_id}",
@@ -184,10 +187,9 @@ def detect_scientific_objects(img_rgba):
 
 
 # ============================================================
-# DETERMINISTIC RENDERING ENGINE
+# RENDERING ENGINE
 # ============================================================
 def render_animation_frame(sequence_items, canvas_settings, current_time, total_duration, width, height):
-    """Renders a single frame of the scientific animation based on the sequence & timeline."""
     bg_type = canvas_settings.get("bg_type", "White")
     custom_color = canvas_settings.get("custom_color", "#FFFFFF")
     mode = canvas_settings.get("mode", "Build from Blank Canvas")
@@ -225,7 +227,6 @@ def render_animation_frame(sequence_items, canvas_settings, current_time, total_
         obj_rgba = obj["rgba"].copy()
         alpha_mult = 1.0
         offset_x = 0
-        offset_y = 0
 
         if entrance == "Fade in":
             alpha_mult = np.clip(progress, 0.0, 1.0)
@@ -244,7 +245,7 @@ def render_animation_frame(sequence_items, canvas_settings, current_time, total_
             obj_rgba[:, :, 3] = (obj_rgba[:, :, 3].astype(np.float32) * alpha_mult).astype(np.uint8)
 
         fx = x + offset_x
-        fy = y + offset_y
+        fy = y
 
         x1 = max(0, fx)
         y1 = max(0, fy)
@@ -309,32 +310,33 @@ if uploaded_file is not None:
         canvas_settings["duration"] = st.sidebar.slider("Total Timeline Duration (s)", 2.0, 20.0, 6.0, 0.5)
 
         st.sidebar.markdown("---")
-        st.sidebar.subheader("🗂️ Manage Detected Objects")
+        st.sidebar.subheader("✏️ Rename Sentences & Objects")
+        st.write("Type your actual diagram text sentences below:")
         
         for obj in st.session_state.objects:
             if "color_category" not in obj:
                 obj["color_category"] = "Other Colors"
-            with st.sidebar.expander(f"{obj['name']} [{obj['type']}]"):
-                obj["name"] = st.text_input("Rename Object", obj["name"], key=f"rename_{obj['id']}")
+            with st.sidebar.expander(f"{obj['type']} [{obj['color_category']}]"):
+                obj["name"] = st.text_input("Enter real text / name:", obj["name"], key=f"rename_{obj['id']}")
                 if st.button(f"🗑️ Delete {obj['id']}", key=f"del_obj_{obj['id']}"):
                     st.session_state.objects = [o for o in st.session_state.objects if o["id"] != obj["id"]]
                     st.session_state.animation_sequence = [item for item in st.session_state.animation_sequence if item["object"]["id"] != obj["id"]]
                     st.rerun()
 
         tab1, tab2, tab3 = st.tabs([
-            "🔍 1. Visual Element Selection", 
+            "🔍 1. Visual Element Selection & Color Filter", 
             "⏱️ 2. Animation Sequence Builder", 
             "🎬 3. Live Preview & Export"
         ])
 
         with tab1:
-            st.subheader("Visual Element Discovery & Selection Dashboard")
+            st.subheader("Visual Element Discovery Dashboard")
             st.write(
-                "Inspect all detected elements grouped by **Color** or **Object Type**. "
-                "Click **'Add to Animation Sequence'** to include an element in your presentation."
+                "Elements are separated by **Color Groups** and **Object Types** (including non-colored lines/arrows). "
+                "Inspect thumbnails and click **'Add to Animation Sequence'**."
             )
 
-            filter_mode = st.radio("Group Elements By:", ["Color Grouping", "Object Type Grouping"], horizontal=True)
+            filter_mode = st.radio("Filter Options By:", ["Color Grouping", "Object Type Grouping"], horizontal=True)
 
             for obj in st.session_state.objects:
                 if "color_category" not in obj:
@@ -374,7 +376,7 @@ if uploaded_file is not None:
                         st.info("✓ In Animation Sequence")
 
             st.markdown("---")
-            st.subheader("Full Diagram Overview (Highlighted Bounding Boxes)")
+            st.subheader("Full Diagram Overview")
             overview_img = cv2.cvtColor(img_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
             for obj in st.session_state.objects:
                 x, y, bw, bh = obj["bbox"]
@@ -383,13 +385,10 @@ if uploaded_file is not None:
 
         with tab2:
             st.subheader("Animation Sequence Builder")
-            st.write(
-                "Arrange your chosen scientific elements, set their precise start times, entrance effects, "
-                "and visibility behaviors."
-            )
+            st.write("Arrange your chosen sentences, colored shapes, and non-colored arrows into your custom animation sequence.")
 
             if not st.session_state.animation_sequence:
-                st.warning("No elements in the animation sequence yet. Go to Tab 1 to add elements!")
+                st.warning("No elements in sequence yet. Add elements from Tab 1!")
             else:
                 for idx, item in enumerate(st.session_state.animation_sequence):
                     obj = item["object"]
