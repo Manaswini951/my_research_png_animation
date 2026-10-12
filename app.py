@@ -1,558 +1,340 @@
 import io
-import json
 import math
-import zipfile
 import cv2
 import numpy as np
 import streamlit as st
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
-# Try importing pytesseract for real sentence extraction
-try:
-    import pytesseract
-    HAS_TESSERACT = True
-except ImportError:
-    HAS_TESSERACT = False
-
-# ============================================================
-# PAGE CONFIGURATION & SETUP
-# ============================================================
 st.set_page_config(
-    page_title="Scientific Illustration Animation Studio",
+    page_title="Scientific Color-Motion Animation Studio",
     page_icon="🔬",
     layout="wide",
 )
 
-st.title("🔬 Scientific Illustration Animation Studio")
+st.title("🔬 Scientific Color-Motion Animation Studio")
 st.write(
-    "Upload research diagrams. The studio extracts real sentences via OCR, groups colored shapes "
-    "by their exact palette, detects non-colored arrows/lines, and organizes them into animation sequences."
+    "Upload a scientific diagram or illustration. Assign scientific animation behaviors "
+    "to each detected color marker (e.g., Fade-in sequence, Label annotation, Pulsing highlight, Structural shift)."
 )
 
 # ============================================================
-# SESSION STATE INITIALIZATION
+# ACCURATE HSV COLOR BOUNDS
 # ============================================================
-if "objects" not in st.session_state:
-    st.session_state.objects = []
-if "animation_sequence" not in st.session_state:
-    st.session_state.animation_sequence = []
-if "canvas_settings" not in st.session_state:
-    st.session_state.canvas_settings = {
-        "mode": "Build from Blank Canvas",
-        "bg_type": "White",
-        "custom_color": "#FFFFFF",
-        "fps": 30,
-        "duration": 6.0,
-    }
-if "project_loaded" not in st.session_state:
-    st.session_state.project_loaded = False
+
+COLOR_RANGES = {
+    "Red": [
+        (np.array([0, 70, 50]), np.array([8, 255, 255])),
+        (np.array([172, 70, 50]), np.array([180, 255, 255])),
+    ],
+    "Orange": [(np.array([9, 70, 50]), np.array([20, 255, 255]))],
+    "Yellow": [(np.array([21, 70, 50]), np.array([34, 255, 255]))],
+    "Green": [(np.array([35, 50, 40]), np.array([84, 255, 255]))],
+    "Cyan / Light Blue": [(np.array([85, 50, 40]), np.array([105, 255, 255]))],
+    "Blue": [(np.array([106, 50, 40]), np.array([130, 255, 255]))],
+    "Purple / Violet": [(np.array([131, 50, 40]), np.array([155, 255, 255]))],
+    "Pink / Magenta": [(np.array([156, 50, 40]), np.array([171, 255, 255]))],
+}
+
+ALL_MOTIONS = [
+    "None (Static)",
+    "Gradual Fade-In (Sequential Assembly)",
+    "Subtle Focus Pulse",
+    "Linear Translation / Slide",
+    "Continuous Slow Rotation",
+    "Steady Growth / Expansion",
+]
 
 
-# ============================================================
-# COLOR CATEGORIZATION & OBJECT EXTRACTION
-# ============================================================
-def classify_color(rgb_color):
-    """Classifies an RGB color tuple into precise scientific palette groups."""
-    r, g, b = int(rgb_color[0]), int(rgb_color[1]), int(rgb_color[2])
-    
-    if r > 200 and g > 200 and b > 200:
-        return "White / Light Gray"
-    if r < 50 and g < 50 and b < 50:
-        return "Black / Dark Gray (Non-colored)"
-    
-    hsv = cv2.cvtColor(np.uint8([[[r, g, b]]]), cv2.COLOR_RGB2HSV)[0][0]
-    h, s, v = int(hsv[0]), int(hsv[1]), int(hsv[2])
+def extract_accurate_colors(image):
+    """Scans image using defined HSV ranges to detect color regions."""
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    total_pixels = image.shape[0] * image.shape[1]
+    detected = []
 
-    if s < 40 and v > 50:
-        return "White / Light Gray"
-    if v < 40:
-        return "Black / Dark Gray (Non-colored)"
+    for name, ranges in COLOR_RANGES.items():
+        combined_mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+        for lower, upper in ranges:
+            mask = cv2.inRange(hsv, lower, upper)
+            combined_mask = cv2.bitwise_or(combined_mask, mask)
 
-    if h < 10 or h > 170:
-        return "Red"
-    elif 10 <= h < 22:
-        return "Orange"
-    elif 22 <= h < 35:
-        return "Yellow"
-    elif 35 <= h < 85:
-        return "Green"
-    elif 85 <= h < 100:
-        return "Cyan / Light Blue"
-    elif 100 <= h < 130:
-        return "Blue"
-    elif 130 <= h < 160:
-        return "Purple / Violet"
-    elif 160 <= h <= 170:
-        return "Pink / Magenta"
-    
-    return "Other Colors"
+        pixel_count = cv2.countNonZero(combined_mask)
+        coverage = (pixel_count / total_pixels) * 100
+
+        if coverage > 0.08:  # Ignore tiny speckles
+            detected.append({
+                "name": name,
+                "coverage": coverage,
+                "mask": combined_mask,
+            })
+
+    return detected
 
 
-def load_image_rgba(uploaded_file):
-    """Loads uploaded image file and preserves RGBA / alpha channels."""
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    img_cv = cv2.imdecode(file_bytes, cv2.IMREAD_UNCHANGED)
-    if img_cv is None:
-        return None
+def detect_parts_per_color(detected_colors):
+    """Extracts connected components for each distinct color region."""
+    color_parts_map = {}
 
-    if len(img_cv.shape) == 2:
-        img_rgba = cv2.cvtColor(img_cv, cv2.COLOR_GRAY2RGBA)
-    elif img_cv.shape[2] == 3:
-        img_rgba = cv2.cvtColor(img_cv, cv2.COLOR_BGR2RGBA)
-    elif img_cv.shape[2] == 4:
-        img_rgba = cv2.cvtColor(img_cv, cv2.COLOR_BGRA2RGBA)
-    else:
-        img_rgba = img_cv
+    for color_info in detected_colors:
+        color_name = color_info["name"]
+        mask = color_info["mask"]
 
-    h, w = img_rgba.shape[:2]
-    if max(h, w) > 1200:
-        scale = 1200.0 / max(h, w)
-        new_w, new_h = int(w * scale), int(h * scale)
-        img_rgba = cv2.resize(img_rgba, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        clean_mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8))
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(clean_mask, connectivity=8)
 
-    return img_rgba
+        parts = []
+        min_area = 40
 
-
-def detect_scientific_objects(img_rgba):
-    """Detects and separates individual scientific objects, extracting real sentences via OCR."""
-    h, w = img_rgba.shape[:2]
-    rgb = img_rgba[:, :, :3]
-    alpha = img_rgba[:, :, 3] if img_rgba.shape[2] == 4 else np.full((h, w), 255, dtype=np.uint8)
-
-    gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
-    if np.any(alpha < 255):
-        thresh = cv2.bitwise_and(thresh, alpha)
-
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
-
-    num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(cleaned, connectivity=8)
-
-    detected_objects = []
-    obj_id = 1
-
-    for i in range(1, num_labels):
-        area = int(stats[i, cv2.CC_STAT_AREA])
-        if area < 25:
-            continue
-
-        x = int(stats[i, cv2.CC_STAT_LEFT])
-        y = int(stats[i, cv2.CC_STAT_TOP])
-        bw = int(stats[i, cv2.CC_STAT_WIDTH])
-        bh = int(stats[i, cv2.CC_STAT_HEIGHT])
-
-        if bw > 0.9 * w and bh > 0.9 * h:
-            continue
-
-        sub_mask = (labels == i).astype(np.uint8) * 255
-        
-        component_pixels = rgb[sub_mask > 0]
-        if len(component_pixels) > 0:
-            mean_color = np.mean(component_pixels, axis=0)
-        else:
-            mean_color = np.array([0, 0, 0])
-
-        color_category = classify_color(mean_color)
-
-        aspect_ratio = float(bw) / float(max(1, bh))
-        if aspect_ratio > 7.0 or aspect_ratio < 0.14:
-            obj_type = "Non-colored Line / Arrow" if "Black" in color_category or "White" in color_category else "Colored Connector / Arrow"
-        elif bw < 140 and bh < 60 and area < 2000:
-            obj_type = "Text Sentence / Label"
-        elif 0.8 < aspect_ratio < 1.2 and area < 2500:
-            obj_type = "Circle / Marker"
-        else:
-            obj_type = "Shape / Region"
-
-        obj_rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
-        mask_crop = sub_mask[y:y+bh, x:x+bw] > 0
-        img_crop = img_rgba[y:y+bh, x:x+bw]
-        obj_rgba[mask_crop] = img_crop[mask_crop]
-
-        # Extract real sentence using OCR if it's a text label
-        extracted_text = ""
-        if obj_type == "Text Sentence / Label" and HAS_TESSERACT:
-            try:
-                pil_crop = Image.fromarray(cv2.cvtColor(obj_rgba[:, :, :3], cv2.COLOR_RGB2BGR))
-                extracted_text = pytesseract.image_to_string(pil_crop, config="--psm 7").strip()
-            except Exception:
-                extracted_text = ""
-
-        if not extracted_text:
-            if obj_type == "Text Sentence / Label":
-                extracted_text = f"Text Label {obj_id}"
-            else:
-                extracted_text = f"{color_category.split(' ')[0]} {obj_type.split('/')[0].strip()} {obj_id}"
-
-        detected_objects.append({
-            "id": f"obj_{obj_id}",
-            "name": extracted_text,
-            "type": obj_type,
-            "color_category": color_category,
-            "mean_color": [int(c) for c in mean_color],
-            "bbox": [x, y, bw, bh],
-            "rgba": obj_rgba,
-            "mask": mask_crop,
-            "visible": True,
-            "locked": False,
-        })
-        obj_id += 1
-
-    return detected_objects
-
-
-# ============================================================
-# RENDERING ENGINE
-# ============================================================
-def render_animation_frame(sequence_items, canvas_settings, current_time, total_duration, width, height):
-    bg_type = canvas_settings.get("bg_type", "White")
-    custom_color = canvas_settings.get("custom_color", "#FFFFFF")
-    mode = canvas_settings.get("mode", "Build from Blank Canvas")
-
-    if bg_type == "White":
-        canvas = np.full((height, width, 4), 255, dtype=np.uint8)
-    elif bg_type == "Transparent":
-        canvas = np.zeros((height, width, 4), dtype=np.uint8)
-    else:
-        hex_c = custom_color.lstrip("#")
-        rgb_c = tuple(int(hex_c[i:i+2], 16) for i in (0, 2, 4))
-        canvas = np.full((height, width, 4), (rgb_c[0], rgb_c[1], rgb_c[2], 255), dtype=np.uint8)
-
-    for item in sequence_items:
-        obj = item["object"]
-        start = item.get("start_time", 0.0)
-        dur = item.get("duration", 0.8)
-        entrance = item.get("entrance", "Fade in")
-        exit_eff = item.get("exit", "Remain Visible")
-
-        if current_time < start:
-            if mode == "Build from Blank Canvas":
+        for i in range(1, num_labels):
+            area = int(stats[i, cv2.CC_STAT_AREA])
+            if area < min_area:
                 continue
-            else:
-                progress = 1.0
-        elif start <= current_time <= start + dur:
-            progress = (current_time - start) / max(0.01, dur)
-        else:
-            if exit_eff == "Fade Out" and current_time > (total_duration - 1.0):
-                progress = max(0.0, 1.0 - (current_time - (total_duration - 1.0)))
-            else:
-                progress = 1.0
 
-        x, y, bw, bh = obj["bbox"]
-        obj_rgba = obj["rgba"].copy()
-        alpha_mult = 1.0
-        offset_x = 0
+            comp = (labels == i).astype(np.uint8) * 255
+            ys, xs = np.where(comp > 0)
+            if len(xs) < 10:
+                continue
 
-        if entrance == "Fade in":
-            alpha_mult = np.clip(progress, 0.0, 1.0)
-        elif entrance == "Slide in from Left":
-            offset_x = int(-120 * (1.0 - np.clip(progress, 0.0, 1.0)))
-            alpha_mult = np.clip(progress, 0.0, 1.0)
-        elif entrance == "Slide in from Right":
-            offset_x = int(120 * (1.0 - np.clip(progress, 0.0, 1.0)))
-            alpha_mult = np.clip(progress, 0.0, 1.0)
-        elif entrance in ["Draw Line Progressively", "Draw Arrow from Tail to Head"]:
-            clip_w = int(bw * np.clip(progress, 0.0, 1.0))
-            if clip_w > 0:
-                obj_rgba[:, clip_w:] = 0
+            base_y = float(np.max(ys))
+            base_x = float(np.mean(xs[ys == int(base_y)]))
 
-        if alpha_mult < 1.0:
-            obj_rgba[:, :, 3] = (obj_rgba[:, :, 3].astype(np.float32) * alpha_mult).astype(np.uint8)
+            tip_y = float(np.min(ys))
+            tip_x = float(np.mean(xs[ys == int(tip_y)]))
 
-        fx = x + offset_x
-        fy = y
+            length = max(10.0, float(math.hypot(tip_x - base_x, tip_y - base_y)))
+            expanded = cv2.dilate(comp, np.ones((5, 5), np.uint8), iterations=1)
 
-        x1 = max(0, fx)
-        y1 = max(0, fy)
-        x2 = min(width, fx + bw)
-        y2 = min(height, fy + bh)
+            parts.append({
+                "mask": expanded > 0,
+                "base": (base_x, base_y),
+                "tip": (tip_x, tip_y),
+                "center": (float(np.mean(xs)), float(np.mean(ys))),
+                "length": length,
+                "area": area,
+            })
 
-        if x1 >= x2 or y1 >= y2:
+        if parts:
+            color_parts_map[color_name] = parts
+
+    return color_parts_map
+
+
+def apply_scientific_motion(map_x, map_y, grid_x, grid_y, parts, motion_type, frame_index, total_frames, intensity, image_shape):
+    """Applies scientific/technical motion deformations onto given part masks."""
+    if motion_type == "None (Static)" or not parts:
+        return
+
+    phase = 2.0 * math.pi * float(frame_index) / float(total_frames)
+    sine = math.sin(phase)
+    h, w = image_shape[:2]
+
+    for part in parts:
+        mask = part["mask"]
+        cx, cy = part["center"]
+
+        if motion_type == "Subtle Focus Pulse":
+            scale_delta = sine * (intensity / 100.0) * 0.15
+            dx = (grid_x - cx) * scale_delta
+            dy = (grid_y - cy) * scale_delta
+            map_x[mask] -= dx[mask]
+            map_y[mask] -= dy[mask]
+
+        elif motion_type == "Linear Translation / Slide":
+            dx = sine * (intensity * 0.5)
+            map_x[mask] -= dx
+
+        elif motion_type == "Continuous Slow Rotation":
+            angle = (float(frame_index) / total_frames) * 0.05 * (intensity / 10.0)
+            cos_a, sin_a = math.cos(angle), math.sin(angle)
+            orig_x = grid_x[mask] - cx
+            orig_y = grid_y[mask] - cy
+            rot_x = orig_x * cos_a - orig_y * sin_a + cx
+            rot_y = orig_x * sin_a + orig_y * cos_a + cy
+            map_x[mask] = rot_x
+            map_y[mask] = rot_y
+
+        elif motion_type == "Steady Growth / Expansion":
+            growth = (float(frame_index) / total_frames) * (intensity * 0.05)
+            dx = (grid_x - cx) * growth
+            dy = (grid_y - cy) * growth
+            map_x[mask] -= dx[mask]
+            map_y[mask] -= dy[mask]
+
+
+def animate_frame_scientific(original, color_parts_map, color_motion_assignments, color_order, frame_index, total_frames, intensity):
+    """Combines scientific animations including blank-white start and sequential assembly with captions."""
+    h, w = original.shape[:2]
+    
+    # 1. Blank white background start
+    canvas = np.ones_like(original) * 255
+
+    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
+    map_x = grid_x.copy()
+    map_y = grid_y.copy()
+
+    # Track cumulative frames for sequential appearance
+    accumulated_frames = 0
+    active_colors_data = []
+
+    for idx, color_name in enumerate(color_order):
+        if color_name not in color_parts_map:
             continue
+        parts = color_parts_map[color_name]
+        motion = color_motion_assignments.get(color_name, "None (Static)")
+        
+        # Each color appears sequentially based on order
+        item_start_frame = accumulated_frames
+        item_duration = total_frames // max(1, len(color_order))
+        accumulated_frames += item_duration
 
-        src_x1 = x1 - fx
-        src_y1 = y1 - fy
-        src_x2 = src_x1 + (x2 - x1)
-        src_y2 = src_y1 + (y2 - y1)
+        if frame_index >= item_start_frame:
+            local_frame_idx = frame_index - item_start_frame
+            
+            # Apply motion
+            apply_scientific_motion(map_x, map_y, grid_x, grid_y, parts, motion, local_frame_idx, total_frames, intensity, (h, w))
+            
+            # Calculate fade-in alpha if Gradual Fade-In is selected
+            alpha = 1.0
+            if motion == "Gradual Fade-In (Sequential Assembly)":
+                fade_frames = max(1, item_duration // 2)
+                alpha = min(1.0, float(local_frame_idx) / float(fade_frames))
 
-        patch = obj_rgba[src_y1:src_y2, src_x1:src_x2]
-        if patch.shape[0] == 0 or patch.shape[1] == 0:
-            continue
+            active_colors_data.append((parts, alpha))
 
-        alpha_s = patch[:, :, 3:4].astype(np.float32) / 255.0
-        dest_roi = canvas[y1:y2, x1:x2].astype(np.float32)
+    # Perform remapping for active parts
+    warped = cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
 
-        composite = patch.astype(np.float32) * alpha_s + dest_roi * (1.0 - alpha_s)
-        canvas[y1:y2, x1:x2] = np.clip(composite, 0, 255).astype(np.uint8)
+    # Composite onto blank white background with proper alpha blending for fade-ins
+    final_frame = np.ones_like(original) * 255
+    for parts, alpha in active_colors_data:
+        for p in parts:
+            mask = p["mask"]
+            if alpha >= 1.0:
+                final_frame[mask] = warped[mask]
+            else:
+                final_frame[mask] = cv2.addWeighted(np.ones_like(original)[mask] * 255, 1.0 - alpha, warped[mask], alpha, 0)
 
-    return canvas
+    return final_frame
+
+
+def build_gif(frames, duration=50):
+    buf = io.BytesIO()
+    prepared = [f.convert("P", palette=Image.ADAPTIVE) for f in frames]
+    prepared[0].save(buf, format="GIF", save_all=True, append_images=prepared[1:], duration=duration, loop=0)
+    return buf.getvalue()
 
 
 # ============================================================
-# STREAMLIT UI WORKFLOW
+# STREAMLIT UI
 # ============================================================
-uploaded_file = st.file_uploader("Upload Scientific Diagram (PNG, JPG, JPEG, WebP)", type=["png", "jpg", "jpeg", "webp"])
+
+uploaded_file = st.file_uploader("Upload scientific diagram / illustration", type=["jpg", "jpeg", "png", "webp"])
 
 if uploaded_file is not None:
-    if not st.session_state.project_loaded:
-        img_rgba = load_image_rgba(uploaded_file)
-        if img_rgba is not None:
-            st.session_state.original_image = img_rgba
-            st.session_state.objects = detect_scientific_objects(img_rgba)
-            st.session_state.animation_sequence = []
-            st.session_state.project_loaded = True
-            st.success(f"Successfully detected {len(st.session_state.objects)} scientific elements with OCR sentences!")
+    try:
+        file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
 
-    if st.session_state.project_loaded:
-        img_rgba = st.session_state.original_image
-        h, w = img_rgba.shape[:2]
+        if img is None:
+            st.error("Invalid image format.")
+            st.stop()
 
-        st.sidebar.header("⚙️ Studio Settings")
-        canvas_settings = st.session_state.canvas_settings
+        h, w = img.shape[:2]
+        if max(h, w) > 1000:
+            scale = 1000.0 / max(h, w)
+            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
 
-        canvas_settings["mode"] = st.sidebar.selectbox(
-            "Composition Mode",
-            ["Build from Blank Canvas", "Animate Existing Diagram"],
-            index=0 if canvas_settings["mode"] == "Build from Blank Canvas" else 1,
-        )
-        canvas_settings["bg_type"] = st.sidebar.selectbox(
-            "Output Background", ["White", "Transparent", "Custom Color"], index=0
-        )
-        if canvas_settings["bg_type"] == "Custom Color":
-            canvas_settings["custom_color"] = st.sidebar.color_picker("Background Color", "#FFFFFF")
+        detected_colors = extract_accurate_colors(img)
+        color_parts_map = detect_parts_per_color(detected_colors)
 
-        canvas_settings["fps"] = st.sidebar.slider("Frame Rate (FPS)", 15, 60, 30, 5)
-        canvas_settings["duration"] = st.sidebar.slider("Total Timeline Duration (s)", 2.0, 20.0, 6.0, 0.5)
+        st.sidebar.header("⚙️ Scientific Animation Dashboard")
+        color_motion_assignments = {}
+        color_sentences = {}
 
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("✏️ Edit Real Sentences & Objects")
-        st.write("Modify extracted text sentences or rename objects below:")
-        
-        for obj in st.session_state.objects:
-            if "color_category" not in obj:
-                obj["color_category"] = "Other Colors"
-            with st.sidebar.expander(f"{obj['type']} [{obj['color_category']}]"):
-                obj["name"] = st.text_input("Sentence / Name:", obj["name"], key=f"rename_{obj['id']}")
-                if st.button(f"🗑️ Delete {obj['id']}", key=f"del_obj_{obj['id']}"):
-                    st.session_state.objects = [o for o in st.session_state.objects if o["id"] != obj["id"]]
-                    st.session_state.animation_sequence = [item for item in st.session_state.animation_sequence if item["object"]["id"] != obj["id"]]
-                    st.rerun()
-
-        tab1, tab2, tab3 = st.tabs([
-            "🔍 1. Visual Element Selection & Color Filter", 
-            "⏱️ 2. Animation Sequence Builder", 
-            "🎬 3. Live Preview & Export"
-        ])
-
-        with tab1:
-            st.subheader("Visual Element Discovery Dashboard")
-            st.write(
-                "Elements are grouped by **Color Groups** and **Object Types** (with non-colored lines/arrows separated). "
-                "Inspect your real sentences and thumbnails, then click **'Add to Animation Sequence'**."
-            )
-
-            filter_mode = st.radio("Filter Options By:", ["Color Grouping", "Object Type Grouping"], horizontal=True)
-
-            for obj in st.session_state.objects:
-                if "color_category" not in obj:
-                    obj["color_category"] = "Other Colors"
-
-            if filter_mode == "Color Grouping":
-                colors_found = sorted(list(set(o.get("color_category", "Other Colors") for o in st.session_state.objects)))
-                selected_color = st.selectbox("Select Color Group:", colors_found)
-                filtered_objs = [o for o in st.session_state.objects if o.get("color_category", "Other Colors") == selected_color]
-            else:
-                types_found = sorted(list(set(o["type"] for o in st.session_state.objects)))
-                selected_type = st.selectbox("Select Object Type:", types_found)
-                filtered_objs = [o for o in st.session_state.objects if o["type"] == selected_type]
-
-            st.markdown(f"**Showing {len(filtered_objs)} elements:**")
-
-            cols = st.columns(3)
-            for idx, obj in enumerate(filtered_objs):
-                with cols[idx % 3]:
-                    st.markdown(f"**{obj['name']}**")
-                    thumb_rgb = cv2.cvtColor(obj["rgba"], cv2.COLOR_BGRA2RGBA)
-                    st.image(thumb_rgb, width=150)
-                    
-                    already_in_seq = any(item["object"]["id"] == obj["id"] for item in st.session_state.animation_sequence)
-                    if not already_in_seq:
-                        if st.button(f"➕ Add to Sequence", key=f"add_{obj['id']}"):
-                            st.session_state.animation_sequence.append({
-                                "object": obj,
-                                "start_time": float(len(st.session_state.animation_sequence) * 0.8),
-                                "duration": 0.8,
-                                "entrance": "Fade in" if "Line" not in obj["type"] else "Draw Line Progressively",
-                                "exit": "Remain Visible",
-                            })
-                            st.success(f"Added {obj['name']} to sequence!")
-                            st.rerun()
-                    else:
-                        st.info("✓ In Animation Sequence")
-
-            st.markdown("---")
-            st.subheader("Full Diagram Overview")
-            overview_img = cv2.cvtColor(img_rgba[:, :, :3], cv2.COLOR_RGB2BGR)
-            for obj in st.session_state.objects:
-                x, y, bw, bh = obj["bbox"]
-                cv2.rectangle(overview_img, (x, y), (x + bw, y + bh), (0, 0, 255), 2)
-            st.image(cv2.cvtColor(overview_img, cv2.COLOR_BGR2RGB), width="stretch")
-
-        with tab2:
-            st.subheader("Animation Sequence Builder")
-            st.write("Arrange your sentences, colored shapes, and non-colored lines/arrows into your animation sequence.")
-
-            if not st.session_state.animation_sequence:
-                st.warning("No elements in sequence yet. Add elements from Tab 1!")
-            else:
-                for idx, item in enumerate(st.session_state.animation_sequence):
-                    obj = item["object"]
-                    with st.expander(f"Step {idx+1}: {obj['name']} ({obj['type']})", expanded=True):
-                        col_a, col_b, col_c = st.columns([1, 2, 1])
-                        
-                        with col_a:
-                            st.image(cv2.cvtColor(obj["rgba"], cv2.COLOR_BGRA2RGBA), width=120)
-                        
-                        with col_b:
-                            item["start_time"] = st.slider(
-                                "Start Time (s)", 0.0, canvas_settings["duration"], item["start_time"], 0.1, key=f"seq_start_{idx}"
-                            )
-                            item["duration"] = st.slider(
-                                "Duration (s)", 0.1, 3.0, item["duration"], 0.1, key=f"seq_dur_{idx}"
-                            )
-                            
-                            entrance_options = [
-                                "Fade in", "Slide in from Left", "Slide in from Right", 
-                                "Draw Line Progressively", "Draw Arrow from Tail to Head", "Instant"
-                            ]
-                            item["entrance"] = st.selectbox(
-                                "Entrance Effect", entrance_options, 
-                                index=entrance_options.index(item["entrance"]) if item["entrance"] in entrance_options else 0,
-                                key=f"seq_ent_{idx}"
-                            )
-
-                            exit_options = ["Remain Visible", "Fade Out"]
-                            item["exit"] = st.selectbox(
-                                "Exit Effect", exit_options,
-                                index=exit_options.index(item["exit"]) if item["exit"] in exit_options else 0,
-                                key=f"seq_exit_{idx}"
-                            )
-
-                        with col_c:
-                            st.markdown("<br>", unsafe_allow_html=True)
-                            if idx > 0 and st.button("⬆️ Move Up", key=f"up_{idx}"):
-                                st.session_state.animation_sequence[idx], st.session_state.animation_sequence[idx-1] = \
-                                    st.session_state.animation_sequence[idx-1], st.session_state.animation_sequence[idx]
-                                st.rerun()
-                            if idx < len(st.session_state.animation_sequence) - 1 and st.button("⬇️ Move Down", key=f"down_{idx}"):
-                                st.session_state.animation_sequence[idx], st.session_state.animation_sequence[idx+1] = \
-                                    st.session_state.animation_sequence[idx+1], st.session_state.animation_sequence[idx]
-                                st.rerun()
-                            if st.button("❌ Remove", key=f"rem_{idx}"):
-                                st.session_state.animation_sequence.pop(idx)
-                                st.rerun()
-
-        with tab3:
-            st.subheader("Interactive Scene Preview & Multi-Format Export")
+        if color_parts_map:
+            st.sidebar.write("Configure motion and appearance text per detected color region:")
             
-            scrub_time = st.slider(
-                "Scrub Timeline Preview (Seconds)", 0.0, canvas_settings["duration"], 0.0, 0.1, key="scrubber"
+            color_order = list(color_parts_map.keys())
+
+            for color_name, parts in color_parts_map.items():
+                with st.sidebar.expander(f"Color: {color_name} ({len(parts)} regions)"):
+                    selected_motion = st.selectbox(
+                        "Behavior",
+                        ALL_MOTIONS,
+                        index=1, # Default to Gradual Fade-In for scientific assembly
+                        key=f"motion_{color_name}",
+                    )
+                    color_motion_assignments[color_name] = selected_motion
+
+                    sentence_input = st.text_input(
+                        "Caption / Explanation Sentence",
+                        value=f"Showing component: {color_name}",
+                        key=f"sentence_{color_name}"
+                    )
+                    color_sentences[color_name] = sentence_input
+        else:
+            st.sidebar.warning("No distinct colored markers detected.")
+            color_order = []
+
+        intensity = float(st.sidebar.slider("Animation Intensity / Speed", 4, 30, 10))
+        pause_duration = st.sidebar.slider("Delay / Pause Time between appearances (ms)", 100, 2000, 500, step=100)
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.subheader("Original Diagram")
+            st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+        with col2:
+            st.subheader("Detected Scientific Color Regions")
+            preview = img.copy()
+
+            for color_name, parts in color_parts_map.items():
+                for p in parts:
+                    cv2.circle(preview, (int(p["base"][0]), int(p["base"][1])), 6, (0, 255, 0), -1)
+                    cv2.circle(preview, (int(p["tip"][0]), int(p["tip"][1])), 4, (0, 0, 255), -1)
+                    cv2.line(preview, (int(p["base"][0]), int(p["base"][1])), (int(p["tip"][0]), int(p["tip"][1])), (255, 255, 0), 2)
+
+            st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), use_container_width=True)
+
+        st.markdown("---")
+
+        render_btn = st.button("🔬 Render Scientific Animation", type="primary", disabled=(len(color_parts_map) == 0))
+
+        if render_btn:
+            with st.spinner("Rendering blank-white start, sequential assembly, and scientific annotations..."):
+                frames = []
+                total_frames = 24
+                for i in range(total_frames):
+                    warped = animate_frame_scientific(img, color_parts_map, color_motion_assignments, color_order, i, total_frames, intensity)
+                    
+                    # Add caption overlay corresponding to active timeline
+                    current_color_idx = min(len(color_order) - 1, int(i / (total_frames / max(1, len(color_order)))))
+                    active_color = color_order[current_color_idx] if color_order else ""
+                    caption_text = color_sentences.get(active_color, "")
+
+                    # Draw text overlay using PIL
+                    pil_img = Image.fromarray(np.ascontiguousarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)))
+                    draw = ImageDraw.Draw(pil_img)
+                    if caption_text:
+                        draw.rectangle([(10, h - 45), (w - 10, h - 10)], fill=(240, 240, 240, 230))
+                        draw.text((20, h - 38), caption_text, fill=(20, 20, 20))
+
+                    frames.append(pil_img)
+
+                frame_duration = int(pause_duration / max(1, len(color_order)))
+                gif_bytes = build_gif(frames, duration=max(40, frame_duration))
+
+            st.subheader("🎬 Scientific Animation Result")
+            st.image(gif_bytes, width=600)
+            
+            summary_str = " → ".join([f"**{c}**: {color_sentences.get(c, '')}" for c in color_order])
+            st.caption(f"Sequential Animation Flow: {summary_str}")
+
+            st.download_button(
+                "Download Scientific Animation GIF",
+                data=gif_bytes,
+                file_name="scientific_diagram_animation.gif",
+                mime="image/gif",
             )
 
-            current_frame = render_animation_frame(
-                st.session_state.animation_sequence, canvas_settings, scrub_time, canvas_settings["duration"], w, h
-            )
-            st.image(current_frame, width="stretch")
-
-            st.markdown("---")
-            st.subheader("📤 Export Options")
-
-            col_exp1, col_exp2, col_exp3 = st.columns(3)
-
-            with col_exp1:
-                if st.button("✨ Render & Export Animated GIF", type="primary"):
-                    with st.spinner("Rendering animation GIF frames..."):
-                        fps = canvas_settings["fps"]
-                        total_dur = canvas_settings["duration"]
-                        total_frames = int(fps * total_dur)
-                        gif_frames = []
-
-                        for i in range(total_frames):
-                            t = (i / total_frames) * total_dur
-                            frame_rgba = render_animation_frame(
-                                st.session_state.animation_sequence, canvas_settings, t, total_dur, w, h
-                            )
-                            pil_img = Image.fromarray(frame_rgba).convert("P", palette=Image.ADAPTIVE)
-                            gif_frames.append(pil_img)
-
-                        gif_buf = io.BytesIO()
-                        gif_frames[0].save(
-                            gif_buf, format="GIF", save_all=True, append_images=gif_frames[1:],
-                            duration=int(1000 / fps), loop=0
-                        )
-                        gif_bytes = gif_buf.getvalue()
-
-                    st.success("Your animation GIF is ready!")
-                    st.download_button(
-                        "Download GIF Animation",
-                        data=gif_bytes,
-                        file_name="scientific_animation.gif",
-                        mime="image/gif",
-                    )
-
-            with col_exp2:
-                if st.button("📦 Export Frame Sequence (ZIP)"):
-                    with st.spinner("Generating PNG frames ZIP..."):
-                        fps = canvas_settings["fps"]
-                        total_dur = canvas_settings["duration"]
-                        total_frames = int(fps * total_dur)
-                        zip_buf = io.BytesIO()
-
-                        with zipfile.ZipFile(zip_buf, "w") as zf:
-                            for i in range(total_frames):
-                                t = (i / total_frames) * total_dur
-                                frame_rgba = render_animation_frame(
-                                    st.session_state.animation_sequence, canvas_settings, t, total_dur, w, h
-                                )
-                                pil_img = Image.fromarray(frame_rgba)
-                                img_byte_arr = io.BytesIO()
-                                pil_img.save(img_byte_arr, format="PNG")
-                                zf.writestr(f"frame_{i:04d}.png", img_byte_arr.getvalue())
-
-                        zip_bytes = zip_buf.getvalue()
-
-                    st.success("Frames ZIP ready!")
-                    st.download_button(
-                        "Download Frames ZIP",
-                        data=zip_bytes,
-                        file_name="animation_frames.zip",
-                        mime="application/zip",
-                    )
-
-            with col_exp3:
-                serializable_seq = [
-                    {
-                        "object_id": item["object"]["id"],
-                        "object_name": item["object"]["name"],
-                        "start_time": item["start_time"],
-                        "duration": item["duration"],
-                        "entrance": item["entrance"],
-                        "exit": item["exit"],
-                    }
-                    for item in st.session_state.animation_sequence
-                ]
-                project_data = {
-                    "canvas_settings": canvas_settings,
-                    "animation_sequence": serializable_seq,
-                }
-                json_str = json.dumps(project_data, indent=2)
-                st.download_button(
-                    "💾 Save Project Configuration",
-                    data=json_str,
-                    file_name="scientific_animation_project.json",
-                    mime="application/json",
-                )
-
-else:
-    st.info("👆 Please upload a scientific diagram image (PNG, JPG, JPEG, WebP) in Tab 1 or the sidebar to begin.")
+    except Exception as e:
+        st.error(f"Error encountered: {e}")
