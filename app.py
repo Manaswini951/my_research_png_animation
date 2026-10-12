@@ -7,6 +7,13 @@ import numpy as np
 import streamlit as st
 from PIL import Image
 
+# Try importing pytesseract for real sentence extraction
+try:
+    import pytesseract
+    HAS_TESSERACT = True
+except ImportError:
+    HAS_TESSERACT = False
+
 # ============================================================
 # PAGE CONFIGURATION & SETUP
 # ============================================================
@@ -18,8 +25,8 @@ st.set_page_config(
 
 st.title("🔬 Scientific Illustration Animation Studio")
 st.write(
-    "Upload research diagrams. Inspect color-coded elements, edit text labels with your "
-    "actual diagram sentences, and organize them into professional animation sequences."
+    "Upload research diagrams. The studio extracts real sentences via OCR, groups colored shapes "
+    "by their exact palette, detects non-colored arrows/lines, and organizes them into animation sequences."
 )
 
 # ============================================================
@@ -107,7 +114,7 @@ def load_image_rgba(uploaded_file):
 
 
 def detect_scientific_objects(img_rgba):
-    """Detects and separates individual scientific objects, color regions, and non-colored lines/arrows."""
+    """Detects and separates individual scientific objects, extracting real sentences via OCR."""
     h, w = img_rgba.shape[:2]
     rgb = img_rgba[:, :, :3]
     alpha = img_rgba[:, :, 3] if img_rgba.shape[2] == 4 else np.full((h, w), 255, dtype=np.uint8)
@@ -151,8 +158,8 @@ def detect_scientific_objects(img_rgba):
         aspect_ratio = float(bw) / float(max(1, bh))
         if aspect_ratio > 7.0 or aspect_ratio < 0.14:
             obj_type = "Non-colored Line / Arrow" if "Black" in color_category or "White" in color_category else "Colored Connector / Arrow"
-        elif bw < 90 and bh < 50 and area < 1500:
-            obj_type = "Text Label / Sentence"
+        elif bw < 140 and bh < 60 and area < 2000:
+            obj_type = "Text Sentence / Label"
         elif 0.8 < aspect_ratio < 1.2 and area < 2500:
             obj_type = "Circle / Marker"
         else:
@@ -163,15 +170,24 @@ def detect_scientific_objects(img_rgba):
         img_crop = img_rgba[y:y+bh, x:x+bw]
         obj_rgba[mask_crop] = img_crop[mask_crop]
 
-        # Meaningful default naming instead of generic numbering
-        if "Text" in obj_type:
-            default_name = f"Label {obj_id} (Edit your text here)"
-        else:
-            default_name = f"{color_category.split(' ')[0]} {obj_type.split('/')[0].strip()} {obj_id}"
+        # Extract real sentence using OCR if it's a text label
+        extracted_text = ""
+        if obj_type == "Text Sentence / Label" and HAS_TESSERACT:
+            try:
+                pil_crop = Image.fromarray(cv2.cvtColor(obj_rgba[:, :, :3], cv2.COLOR_RGB2BGR))
+                extracted_text = pytesseract.image_to_string(pil_crop, config="--psm 7").strip()
+            except Exception:
+                extracted_text = ""
+
+        if not extracted_text:
+            if obj_type == "Text Sentence / Label":
+                extracted_text = f"Text Label {obj_id}"
+            else:
+                extracted_text = f"{color_category.split(' ')[0]} {obj_type.split('/')[0].strip()} {obj_id}"
 
         detected_objects.append({
             "id": f"obj_{obj_id}",
-            "name": default_name,
+            "name": extracted_text,
             "type": obj_type,
             "color_category": color_category,
             "mean_color": [int(c) for c in mean_color],
@@ -286,7 +302,7 @@ if uploaded_file is not None:
             st.session_state.objects = detect_scientific_objects(img_rgba)
             st.session_state.animation_sequence = []
             st.session_state.project_loaded = True
-            st.success(f"Successfully detected {len(st.session_state.objects)} scientific elements!")
+            st.success(f"Successfully detected {len(st.session_state.objects)} scientific elements with OCR sentences!")
 
     if st.session_state.project_loaded:
         img_rgba = st.session_state.original_image
@@ -310,14 +326,14 @@ if uploaded_file is not None:
         canvas_settings["duration"] = st.sidebar.slider("Total Timeline Duration (s)", 2.0, 20.0, 6.0, 0.5)
 
         st.sidebar.markdown("---")
-        st.sidebar.subheader("✏️ Rename Sentences & Objects")
-        st.write("Type your actual diagram text sentences below:")
+        st.sidebar.subheader("✏️ Edit Real Sentences & Objects")
+        st.write("Modify extracted text sentences or rename objects below:")
         
         for obj in st.session_state.objects:
             if "color_category" not in obj:
                 obj["color_category"] = "Other Colors"
             with st.sidebar.expander(f"{obj['type']} [{obj['color_category']}]"):
-                obj["name"] = st.text_input("Enter real text / name:", obj["name"], key=f"rename_{obj['id']}")
+                obj["name"] = st.text_input("Sentence / Name:", obj["name"], key=f"rename_{obj['id']}")
                 if st.button(f"🗑️ Delete {obj['id']}", key=f"del_obj_{obj['id']}"):
                     st.session_state.objects = [o for o in st.session_state.objects if o["id"] != obj["id"]]
                     st.session_state.animation_sequence = [item for item in st.session_state.animation_sequence if item["object"]["id"] != obj["id"]]
@@ -332,8 +348,8 @@ if uploaded_file is not None:
         with tab1:
             st.subheader("Visual Element Discovery Dashboard")
             st.write(
-                "Elements are separated by **Color Groups** and **Object Types** (including non-colored lines/arrows). "
-                "Inspect thumbnails and click **'Add to Animation Sequence'**."
+                "Elements are grouped by **Color Groups** and **Object Types** (with non-colored lines/arrows separated). "
+                "Inspect your real sentences and thumbnails, then click **'Add to Animation Sequence'**."
             )
 
             filter_mode = st.radio("Filter Options By:", ["Color Grouping", "Object Type Grouping"], horizontal=True)
@@ -385,7 +401,7 @@ if uploaded_file is not None:
 
         with tab2:
             st.subheader("Animation Sequence Builder")
-            st.write("Arrange your chosen sentences, colored shapes, and non-colored arrows into your custom animation sequence.")
+            st.write("Arrange your sentences, colored shapes, and non-colored lines/arrows into your animation sequence.")
 
             if not st.session_state.animation_sequence:
                 st.warning("No elements in sequence yet. Add elements from Tab 1!")
