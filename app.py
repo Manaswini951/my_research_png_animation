@@ -53,7 +53,6 @@ def classify_color(rgb_color):
     if r < 50 and g < 50 and b < 50:
         return "Black / Dark Gray"
     
-    # Convert to HSV for accurate hue categorization
     hsv = cv2.cvtColor(np.uint8([[[r, g, b]]]), cv2.COLOR_RGB2HSV)[0][0]
     h, s, v = int(hsv[0]), int(hsv[1]), int(hsv[2])
 
@@ -107,7 +106,7 @@ def load_image_rgba(uploaded_file):
     return img_rgba
 
 
-def extract_scientific_objects(img_rgba):
+def detect_scientific_objects(img_rgba):
     """Detects and separates individual scientific objects, arrows, lines, and text regions."""
     h, w = img_rgba.shape[:2]
     rgb = img_rgba[:, :, :3]
@@ -115,12 +114,10 @@ def extract_scientific_objects(img_rgba):
 
     gray = cv2.cvtColor(rgb, cv2.COLOR_RGB2GRAY)
 
-    # Adaptive thresholding to capture shapes & text even with uneven illumination
     thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
     if np.any(alpha < 255):
         thresh = cv2.bitwise_and(thresh, alpha)
 
-    # Morphological cleaning
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
     cleaned = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=1)
 
@@ -131,7 +128,7 @@ def extract_scientific_objects(img_rgba):
 
     for i in range(1, num_labels):
         area = int(stats[i, cv2.CC_STAT_AREA])
-        if area < 25:  # Filter out tiny pixel noise
+        if area < 25:
             continue
 
         x = int(stats[i, cv2.CC_STAT_LEFT])
@@ -139,13 +136,11 @@ def extract_scientific_objects(img_rgba):
         bw = int(stats[i, cv2.CC_STAT_WIDTH])
         bh = int(stats[i, cv2.CC_STAT_HEIGHT])
 
-        # Ignore outer background frame if it spans almost entire image
         if bw > 0.9 * w and bh > 0.9 * h:
             continue
 
         sub_mask = (labels == i).astype(np.uint8) * 255
         
-        # Determine dominant color for this component
         component_pixels = rgb[sub_mask > 0]
         if len(component_pixels) > 0:
             mean_color = np.mean(component_pixels, axis=0)
@@ -154,7 +149,6 @@ def extract_scientific_objects(img_rgba):
 
         color_category = classify_color(mean_color)
 
-        # Heuristic classification for scientific elements
         aspect_ratio = float(bw) / float(max(1, bh))
         if aspect_ratio > 7.0 or aspect_ratio < 0.14:
             obj_type = "Straight Line / Arrow"
@@ -165,13 +159,11 @@ def extract_scientific_objects(img_rgba):
         else:
             obj_type = "Rectangle / Shape"
 
-        # Crop RGBA asset
         obj_rgba = np.zeros((bh, bw, 4), dtype=np.uint8)
         mask_crop = sub_mask[y:y+bh, x:x+bw] > 0
         img_crop = img_rgba[y:y+bh, x:x+bw]
         obj_rgba[mask_crop] = img_crop[mask_crop]
 
-        # Generate default label name
         default_name = f"{obj_type.split('/')[0].strip()} {obj_id} ({color_category})"
 
         detected_objects.append({
@@ -196,11 +188,10 @@ def extract_scientific_objects(img_rgba):
 # ============================================================
 def render_animation_frame(sequence_items, canvas_settings, current_time, total_duration, width, height):
     """Renders a single frame of the scientific animation based on the sequence & timeline."""
-    bg_type = canvas_settings["bg_type"]
-    custom_color = canvas_settings["custom_color"]
-    mode = canvas_settings["mode"]
+    bg_type = canvas_settings.get("bg_type", "White")
+    custom_color = canvas_settings.get("custom_color", "#FFFFFF")
+    mode = canvas_settings.get("mode", "Build from Blank Canvas")
 
-    # Initialize canvas
     if bg_type == "White":
         canvas = np.full((height, width, 4), 255, dtype=np.uint8)
     elif bg_type == "Transparent":
@@ -212,17 +203,16 @@ def render_animation_frame(sequence_items, canvas_settings, current_time, total_
 
     for item in sequence_items:
         obj = item["object"]
-        start = item["start_time"]
-        dur = item["duration"]
-        entrance = item["entrance"]
-        exit_eff = item["exit"]
+        start = item.get("start_time", 0.0)
+        dur = item.get("duration", 0.8)
+        entrance = item.get("entrance", "Fade in")
+        exit_eff = item.get("exit", "Remain Visible")
 
-        # Visibility logic
         if current_time < start:
             if mode == "Build from Blank Canvas":
                 continue
             else:
-                progress = 1.0  # In Animate Existing Diagram mode, show fully before start
+                progress = 1.0
         elif start <= current_time <= start + dur:
             progress = (current_time - start) / max(0.01, dur)
         else:
@@ -237,7 +227,6 @@ def render_animation_frame(sequence_items, canvas_settings, current_time, total_
         offset_x = 0
         offset_y = 0
 
-        # Apply entrance effects
         if entrance == "Fade in":
             alpha_mult = np.clip(progress, 0.0, 1.0)
         elif entrance == "Slide in from Left":
@@ -302,9 +291,6 @@ if uploaded_file is not None:
         img_rgba = st.session_state.original_image
         h, w = img_rgba.shape[:2]
 
-        # ========================================================
-        # SIDEBAR: STUDIO SETTINGS & GLOBAL CONTROLS
-        # ========================================================
         st.sidebar.header("⚙️ Studio Settings")
         canvas_settings = st.session_state.canvas_settings
 
@@ -325,8 +311,9 @@ if uploaded_file is not None:
         st.sidebar.markdown("---")
         st.sidebar.subheader("🗂️ Manage Detected Objects")
         
-        # Allow renaming or deleting raw objects
         for obj in st.session_state.objects:
+            if "color_category" not in obj:
+                obj["color_category"] = "Other Colors"
             with st.sidebar.expander(f"{obj['name']} [{obj['type']}]"):
                 obj["name"] = st.text_input("Rename Object", obj["name"], key=f"rename_{obj['id']}")
                 if st.button(f"🗑️ Delete {obj['id']}", key=f"del_obj_{obj['id']}"):
@@ -334,9 +321,6 @@ if uploaded_file is not None:
                     st.session_state.animation_sequence = [item for item in st.session_state.animation_sequence if item["object"]["id"] != obj["id"]]
                     st.rerun()
 
-        # ========================================================
-        # MAIN TABS: 1. Visual Discovery & Selection | 2. Animation Sequence | 3. Preview & Export
-        # ========================================================
         tab1, tab2, tab3 = st.tabs([
             "🔍 1. Visual Element Selection", 
             "⏱️ 2. Animation Sequence Builder", 
@@ -352,10 +336,14 @@ if uploaded_file is not None:
 
             filter_mode = st.radio("Group Elements By:", ["Color Grouping", "Object Type Grouping"], horizontal=True)
 
+            for obj in st.session_state.objects:
+                if "color_category" not in obj:
+                    obj["color_category"] = "Other Colors"
+
             if filter_mode == "Color Grouping":
-                colors_found = sorted(list(set(o["color_category"] for o in st.session_state.objects)))
+                colors_found = sorted(list(set(o.get("color_category", "Other Colors") for o in st.session_state.objects)))
                 selected_color = st.selectbox("Select Color Group:", colors_found)
-                filtered_objs = [o for o in st.session_state.objects if o["color_category"] == selected_color]
+                filtered_objs = [o for o in st.session_state.objects if o.get("color_category", "Other Colors") == selected_color]
             else:
                 types_found = sorted(list(set(o["type"] for o in st.session_state.objects)))
                 selected_type = st.selectbox("Select Object Type:", types_found)
@@ -363,12 +351,10 @@ if uploaded_file is not None:
 
             st.markdown(f"**Showing {len(filtered_objs)} elements:**")
 
-            # Display elements in grid columns with thumbnails
             cols = st.columns(3)
             for idx, obj in enumerate(filtered_objs):
                 with cols[idx % 3]:
                     st.markdown(f"**{obj['name']}**")
-                    # Display isolated transparent asset thumbnail
                     thumb_rgb = cv2.cvtColor(obj["rgba"], cv2.COLOR_BGRA2RGBA)
                     st.image(thumb_rgb, width=150)
                     
@@ -393,7 +379,7 @@ if uploaded_file is not None:
             for obj in st.session_state.objects:
                 x, y, bw, bh = obj["bbox"]
                 cv2.rectangle(overview_img, (x, y), (x + bw, y + bh), (0, 0, 255), 2)
-            st.image(cv2.cvtColor(overview_img, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.image(cv2.cvtColor(overview_img, cv2.COLOR_BGR2RGB), width="stretch")
 
         with tab2:
             st.subheader("Animation Sequence Builder")
@@ -462,7 +448,7 @@ if uploaded_file is not None:
             current_frame = render_animation_frame(
                 st.session_state.animation_sequence, canvas_settings, scrub_time, canvas_settings["duration"], w, h
             )
-            st.image(current_frame, use_container_width=True)
+            st.image(current_frame, width="stretch")
 
             st.markdown("---")
             st.subheader("📤 Export Options")
@@ -530,7 +516,6 @@ if uploaded_file is not None:
                     )
 
             with col_exp3:
-                # Save Project Configuration JSON
                 serializable_seq = [
                     {
                         "object_id": item["object"]["id"],
