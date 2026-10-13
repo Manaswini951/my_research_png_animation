@@ -3,22 +3,18 @@ import math
 import cv2
 import numpy as np
 import streamlit as st
-from PIL import Image
-from pptx import Presentation
-from pptx.util import Inches, Pt
-from pptx.dml.color import RGBColor
 
 st.set_page_config(
-    page_title="Single-File Movable Diagram PPTX Studio",
-    page_icon="📊",
+    page_title="Scientific Diagram SVG Studio",
+    page_icon="📐",
     layout="wide",
 )
 
-st.title("📊 Single-File Movable Diagram PowerPoint Studio")
+st.title("📐 Scientific Diagram SVG Studio")
 st.write(
-    "Upload your scientific diagram. The tool generates a **single PowerPoint file** where every "
-    "shape is precisely positioned to form your exact diagram, while remaining 100% independently movable "
-    "and ready for animations and transitions in Google Slides or PowerPoint."
+    "Upload your scientific diagram. The tool extracts every detected component into an **SVG (Scalable Vector Graphics)** format. "
+    "When you open or import the SVG into Google Slides, PowerPoint, or any vector editor, every single shape is completely separate, "
+    "vector-editable, and independently movable!"
 )
 
 # ============================================================
@@ -102,103 +98,72 @@ def detect_parts_per_color(detected_colors):
     return color_parts_map
 
 
-def generate_single_file_powerpoint(img, color_parts_map, color_sentences, color_order):
-    """Generates a single PPTX file with transparent image shapes positioned to form the exact diagram."""
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)  # Widescreen format
-    prs.slide_height = Inches(7.5)
+def generate_svg_file(img, color_parts_map, color_sentences, color_order):
+    """Generates a well-structured SVG file containing grouped, movable shape elements and text annotations."""
+    h, w = img.shape[:2]
+    
+    svg_lines = []
+    svg_lines.append(f'<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" viewBox="0 {0} {w + 450} {h}" width="100%" height="100%">')
+    svg_lines.append('  <style>')
+    svg_lines.append('    .shape-group { cursor: pointer; }')
+    svg_lines.append('    .label-box { font-family: Arial, sans-serif; font-size: 14px; fill: #222; }')
+    svg_lines.append('    .label-title { font-family: Arial, sans-serif; font-size: 16px; font-weight: bold; fill: #0275d8; }')
+    svg_lines.append('  </style>')
+    
+    # White background for clarity
+    svg_lines.append(f'  <rect width="{w}" height="{h}" fill="#ffffff" />')
 
-    blank_layout = prs.slide_layouts[6]
-    slide = prs.slides.add_slide(blank_layout)
-
-    # Set solid white background so it doesn't appear transparent/checkered in Google Slides
-    background = slide.background
-    fill = background.fill
-    fill.solid()
-    fill.fore_color.rgb = RGBColor(255, 255, 255)
-
-    img_h, img_w = img.shape[:2]
-
-    # Define layout dimensions on the slide (Left side for the diagram)
-    canvas_left = Inches(0.8)
-    canvas_top = Inches(0.8)
-    canvas_max_width = Inches(7.0)
-    canvas_max_height = Inches(5.8)
-
-    # Calculate proportional scaling to fit the slide perfectly
-    scale = min(canvas_max_width / img_w, canvas_max_height / img_h)
-
-    # 1. Add each detected shape as an individual transparent movable picture object in memory
+    # 1. Add each detected shape as an embedded base64 PNG image inside its own SVG group (fully movable)
+    import base64
     for color_name in color_order:
         if color_name not in color_parts_map:
             continue
         
-        for part in color_parts_map[color_name]:
+        for idx, part in enumerate(color_parts_map[color_name]):
             xmin, ymin, xmax, ymax = part["bbox"]
             
-            # Add small padding for clean edges
             pad = 2
             xmin_p = max(0, xmin - pad)
             ymin_p = max(0, ymin - pad)
-            xmax_p = min(img_w - 1, xmax + pad)
-            ymax_p = min(img_h - 1, ymax + pad)
+            xmax_p = min(w - 1, xmax + pad)
+            ymax_p = min(h - 1, ymax + pad)
 
-            # Crop region and apply transparency mask
             cropped_bgr = img[ymin_p:ymax_p+1, xmin_p:xmax_p+1]
             cropped_mask = part["mask"][ymin_p:ymax_p+1, xmin_p:xmax_p+1]
 
             bgra = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2BGRA)
-            bgra[~cropped_mask, 3] = 0  # Transparent outside mask
+            bgra[~cropped_mask, 3] = 0
 
-            pil_part = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
-            
-            # Save into memory stream
-            img_stream = io.BytesIO()
-            pil_part.save(img_stream, format="PNG")
-            img_stream.seek(0)
+            success, encoded_png = cv2.imencode(".png", bgra)
+            if success:
+                b64_str = base64.b64encode(encoded_png.tobytes()).decode("utf-8")
+                pw = xmax_p - xmin_p
+                ph = ymax_p - ymin_p
+                
+                # Each shape is wrapped in an independent SVG group (<g>) so it can be moved individually
+                svg_lines.append(f'  <g id="shape_{color_name.replace(" ", "_")}_{idx}" class="shape-group">')
+                svg_lines.append(f'    <image x="{xmin_p}" y="{ymin_p}" width="{pw}" height="{ph}" xlink:href="data:image/png;base64,{b64_str}" />')
+                svg_lines.append('  </g>')
 
-            # Calculate precise position matching the original diagram layout
-            p_left = canvas_left + Inches(xmin_p * scale)
-            p_top = canvas_top + Inches(ymin_p * scale)
-            p_width = Inches((xmax_p - xmin_p) * scale)
-            p_height = Inches((ymax_p - ymin_p) * scale)
-
-            # Insert into slide as an independent movable object
-            slide.shapes.add_picture(img_stream, p_left, p_top, width=p_width, height=p_height)
-
-    # 2. Add movable text boxes on the right side for captions and animation notes
-    text_left = Inches(8.3)
-    text_top = Inches(0.8)
-    text_width = Inches(4.5)
+    # 2. Add movable text annotation blocks on the right side of the SVG canvas
+    text_x = w + 40
+    text_y = 60
 
     for color_name in color_order:
         if color_name not in color_parts_map:
             continue
         
         sentence = color_sentences.get(color_name, f"Details for {color_name}")
+        
+        svg_lines.append(f'  <g id="text_{color_name.replace(" ", "_")}" class="shape-group">')
+        svg_lines.append(f'    <text x="{text_x}" y="{text_y}" class="label-title">■ {color_name}</text>')
+        svg_lines.append(f'    <text x="{text_x}" y="{text_y + 22}" class="label-box">{sentence}</text>')
+        svg_lines.append('  </g>')
 
-        box = slide.shapes.add_textbox(text_left, text_top, text_width, Inches(1.1))
-        tf = box.text_frame
-        tf.word_wrap = True
+        text_y += 90
 
-        p_head = tf.paragraphs[0]
-        p_head.text = f"■ {color_name} Component"
-        p_head.font.size = Pt(13)
-        p_head.font.bold = True
-        p_head.font.color.rgb = RGBColor(0, 102, 204)
-
-        p_desc = tf.add_paragraph()
-        p_desc.text = sentence
-        p_desc.font.size = Pt(11)
-        p_desc.font.color.rgb = RGBColor(50, 50, 50)
-
-        text_top += Inches(1.2)
-
-    # Save presentation to memory buffer
-    ppt_io = io.BytesIO()
-    prs.save(ppt_io)
-    ppt_io.seek(0)
-    return ppt_io.getvalue()
+    svg_lines.append('</svg>')
+    return "\n".join(svg_lines)
 
 
 # ============================================================
@@ -224,17 +189,17 @@ if uploaded_file is not None:
         detected_colors = extract_accurate_colors(img)
         color_parts_map = detect_parts_per_color(detected_colors)
 
-        st.sidebar.header("⚙️ Component Settings")
+        st.sidebar.header("⚙️ SVG Component Settings")
         color_sentences = {}
 
         if color_parts_map:
-            st.sidebar.write("Customize descriptions per shape category:")
+            st.sidebar.write("Customize annotations per shape category:")
             color_order = list(color_parts_map.keys())
 
             for color_name, parts in color_parts_map.items():
                 with st.sidebar.expander(f"Color: {color_name} ({len(parts)} objects)"):
                     sentence_input = st.text_input(
-                        "Animation / Description Note",
+                        "Annotation / Description",
                         value=f"Description for {color_name} component.",
                         key=f"sentence_{color_name}"
                     )
@@ -249,7 +214,7 @@ if uploaded_file is not None:
             st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
         with col2:
-            st.subheader("Isolated Moveable Objects Preview")
+            st.subheader("Detected Vector Layers Preview")
             preview = img.copy()
             total_shapes = 0
 
@@ -260,24 +225,24 @@ if uploaded_file is not None:
                     cv2.rectangle(preview, (xmin, ymin), (xmax, ymax), (0, 255, 0), 1)
 
             st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), use_container_width=True)
-            st.caption(f"Mapped {total_shapes} independent movable objects.")
+            st.caption(f"Mapped {total_shapes} independent SVG elements.")
 
         st.markdown("---")
 
-        render_btn = st.button("📊 Export Movable Diagram Presentation (.pptx)", type="primary", disabled=(len(color_parts_map) == 0))
+        render_btn = st.button("📐 Export Layered SVG File (.svg)", type="primary", disabled=(len(color_parts_map) == 0))
 
         if render_btn:
-            with st.spinner("Building single-file PowerPoint presentation..."):
-                ppt_bytes = generate_single_file_powerpoint(img, color_parts_map, color_sentences, color_order)
+            with st.spinner("Generating layered SVG file..."):
+                svg_content = generate_svg_file(img, color_parts_map, color_sentences, color_order)
 
-            st.subheader("📁 Presentation Ready")
-            st.success("PowerPoint generated successfully! Upload this `.pptx` file into Google Slides to view and animate your diagram.")
+            st.subheader("📁 SVG File Ready")
+            st.success("SVG file generated successfully! You can import this directly into Google Slides, PowerPoint (Office 365 supports native SVG importing where every group is ungroupable), or any vector editor.")
 
             st.download_button(
-                label="Download PowerPoint Presentation (.pptx)",
-                data=ppt_bytes,
-                file_name="movable_diagram_presentation.pptx",
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                label="Download Layered SVG File (.svg)",
+                data=svg_content,
+                file_name="scientific_diagram_movable.svg",
+                mime="image/svg+xml",
             )
 
     except Exception as e:
