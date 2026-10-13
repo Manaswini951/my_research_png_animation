@@ -1,22 +1,23 @@
 import io
 import math
-import zipfile
 import cv2
 import numpy as np
 import streamlit as st
-from PIL import Image
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
 
 st.set_page_config(
-    page_title="Exact Diagram Shape Extractor",
-    page_icon="🧩",
+    page_title="Native PPTX Shape & Transition Studio",
+    page_icon="📊",
     layout="wide",
 )
 
-st.title("🧩 Exact Scientific Diagram Shape Extractor")
+st.title("📊 Native PowerPoint Shape & Transition Studio")
 st.write(
-    "Upload your diagram. This tool isolates every single component with precise transparency. "
-    "When you drag and drop the extracted shapes into PowerPoint, they reassemble into your **exact original diagram**, "
-    "while keeping every single object 100% movable and independent!"
+    "Upload your diagram. The tool converts detected shapes and texts into **native PowerPoint shapes and text boxes**, "
+    "allowing you to freely move them and apply individual PowerPoint transitions and animations to each object!"
 )
 
 # ============================================================
@@ -31,10 +32,10 @@ COLOR_RANGES = {
     "Orange": [(np.array([9, 70, 50]), np.array([20, 255, 255]))],
     "Yellow": [(np.array([21, 70, 50]), np.array([34, 255, 255]))],
     "Green": [(np.array([35, 50, 40]), np.array([84, 255, 255]))],
-    "Cyan_Light_Blue": [(np.array([85, 50, 40]), np.array([105, 255, 255]))],
+    "Cyan / Light Blue": [(np.array([85, 50, 40]), np.array([105, 255, 255]))],
     "Blue": [(np.array([106, 50, 40]), np.array([130, 255, 255]))],
-    "Purple_Violet": [(np.array([131, 50, 40]), np.array([155, 255, 255]))],
-    "Pink_Magenta": [(np.array([156, 50, 40]), np.array([171, 255, 255]))],
+    "Purple / Violet": [(np.array([131, 50, 40]), np.array([155, 255, 255]))],
+    "Pink / Magenta": [(np.array([156, 50, 40]), np.array([171, 255, 255]))],
 }
 
 
@@ -75,7 +76,7 @@ def detect_parts_per_color(detected_colors):
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(clean_mask, connectivity=8)
 
         parts = []
-        min_area = 30
+        min_area = 40
 
         for i in range(1, num_labels):
             area = int(stats[i, cv2.CC_STAT_AREA])
@@ -84,11 +85,10 @@ def detect_parts_per_color(detected_colors):
 
             comp = (labels == i).astype(np.uint8) * 255
             ys, xs = np.where(comp > 0)
-            if len(xs) < 8:
+            if len(xs) < 10:
                 continue
 
             parts.append({
-                "mask": comp > 0,
                 "bbox": (int(np.min(xs)), int(np.min(ys)), int(np.max(xs)), int(np.max(ys))),
                 "center": (float(np.mean(xs)), float(np.mean(ys))),
                 "area": area,
@@ -100,71 +100,102 @@ def detect_parts_per_color(detected_colors):
     return color_parts_map
 
 
-def generate_exact_shapes_zip(img, color_parts_map, color_sentences, color_order):
-    """Generates a ZIP package containing transparent shapes and an instruction guide."""
-    zip_buffer = io.BytesIO()
+def generate_native_editable_powerpoint(img, color_parts_map, color_sentences, color_order):
+    """Generates a PPTX using native PowerPoint shapes and text boxes so they are fully editable and animatable."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)  # Widescreen format
+    prs.slide_height = Inches(7.5)
 
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
-        # 1. Save original diagram reference
-        success, encoded_img = cv2.imencode(".png", img)
-        if success:
-            zip_file.writestr("1_reference_original_diagram.png", encoded_img.tobytes())
+    blank_layout = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(blank_layout)
 
-        # 2. Save text guide on how to assemble in PPT
-        guide_text = (
-            "HOW TO RECONSTRUCT YOUR EXACT DIAGRAM IN POWERPOINT:\n"
-            "====================================================\n"
-            "1. Open PowerPoint and create a blank slide.\n"
-            "2. Open the 'shapes' folder from this zip.\n"
-            "3. Select ALL shape images inside the folder and drag-and-drop them onto your PowerPoint slide at once.\n"
-            "4. Because they share the exact relative pixel dimensions and transparent backgrounds, "
-            "they will line up and form your exact original diagram.\n"
-            "5. Every single piece is now an independent movable object that you can shift, separate, or edit!\n\n"
-            "CAPTIONS & NOTES:\n"
-            "-----------------\n"
-        )
-        for color_name in color_order:
-            if color_name in color_sentences:
-                guide_text += f"- [{color_name}]: {color_sentences[color_name]}\n"
-        
-        zip_file.writestr("0_README_AND_INSTRUCTIONS.txt", guide_text)
+    img_h, img_w = img.shape[:2]
 
-        # 3. Extract each exact shape with tight bounding box and alpha transparency
-        img_h, img_w = img.shape[:2]
-        shape_index = 1
+    # Canvas dimensions on PowerPoint for the diagram mapping
+    canvas_left = Inches(1.0)
+    canvas_top = Inches(1.0)
+    canvas_width = Inches(6.5)
+    canvas_height = Inches(5.5)
 
-        for color_name in color_order:
-            if color_name not in color_parts_map:
-                continue
+    scale_x = canvas_width / img_w
+    scale_y = canvas_height / img_h
+
+    # 1. Add native PowerPoint shapes for each detected component
+    for color_name in color_order:
+        if color_name not in color_parts_map:
+            continue
+
+        for part in color_parts_map[color_name]:
+            xmin, ymin, xmax, ymax = part["bbox"]
             
-            for part in color_parts_map[color_name]:
-                xmin, ymin, xmax, ymax = part["bbox"]
-                
-                # Tight crop with 2px padding for clean edges
-                pad = 2
-                xmin = max(0, xmin - pad)
-                ymin = max(0, ymin - pad)
-                xmax = min(img_w - 1, xmax + pad)
-                ymax = min(img_h - 1, ymax + pad)
+            p_left = canvas_left + Inches(xmin * scale_x)
+            p_top = canvas_top + Inches(ymin * scale_y)
+            p_w = max(Inches(0.2), Inches((xmax - xmin) * scale_x))
+            p_h = max(Inches(0.2), Inches((ymax - ymin) * scale_y))
 
-                cropped_bgr = img[ymin:ymax+1, xmin:xmax+1]
-                cropped_mask = part["mask"][ymin:ymax+1, xmin:xmax+1]
+            # Create a native PowerPoint shape (Rectangle placeholder representing the component)
+            shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, p_left, p_top, p_w, p_h)
+            
+            # Style the shape cleanly so it looks professional and is fully selectable/animatable
+            shape.text = color_name.split("/")[0].strip()
+            shape.text_frame.word_wrap = True
+            
+            # Format text inside shape
+            for paragraph in shape.text_frame.paragraphs:
+                paragraph.font.size = Pt(10)
+                paragraph.font.bold = True
+                paragraph.font.color.rgb = RGBColor(255, 255, 255)
 
-                # Convert to BGRA with transparent background outside mask
-                bgra = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2BGRA)
-                bgra[~cropped_mask, 3] = 0
+            # Style shape fill based on category
+            fill = shape.fill
+            fill.solid()
+            
+            # Assign distinctive nice colors
+            if "Red" in color_name:
+                fill.fore_color.rgb = RGBColor(217, 83, 79)
+            elif "Green" in color_name:
+                fill.fore_color.rgb = RGBColor(92, 184, 92)
+            elif "Blue" in color_name or "Cyan" in color_name:
+                fill.fore_color.rgb = RGBColor(2, 117, 216)
+            elif "Yellow" in color_name or "Orange" in color_name:
+                fill.fore_color.rgb = RGBColor(240, 173, 78)
+            else:
+                fill.fore_color.rgb = RGBColor(91, 192, 222)
 
-                pil_part = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
-                
-                part_io = io.BytesIO()
-                pil_part.save(part_io, format="PNG")
-                
-                file_name = f"shapes/shape_{shape_index:02d}_{color_name}_x{xmin}_y{ymin}.png"
-                zip_file.writestr(file_name, part_io.getvalue())
-                shape_index += 1
+    # 2. Add native movable text boxes on the right side for each description/sentence
+    text_left = Inches(8.0)
+    text_top = Inches(1.0)
+    text_width = Inches(4.5)
 
-    zip_buffer.seek(0)
-    return zip_buffer.getvalue()
+    for color_name in color_order:
+        if color_name not in color_parts_map:
+            continue
+        
+        sentence = color_sentences.get(color_name, f"Details for {color_name}")
+
+        # Create native PowerPoint text box (fully movable & animatable)
+        box = slide.shapes.add_textbox(text_left, text_top, text_width, Inches(1.2))
+        tf = box.text_frame
+        tf.word_wrap = True
+
+        p_head = tf.paragraphs[0]
+        p_head.text = f"◆ {color_name} Component"
+        p_head.font.size = Pt(14)
+        p_head.font.bold = True
+        p_head.font.color.rgb = RGBColor(30, 144, 255)
+
+        p_desc = tf.add_paragraph()
+        p_desc.text = sentence
+        p_desc.font.size = Pt(12)
+        p_desc.font.color.rgb = RGBColor(60, 60, 60)
+
+        text_top += Inches(1.3)
+
+    # Save presentation to memory buffer
+    ppt_io = io.BytesIO()
+    prs.save(ppt_io)
+    ppt_io.seek(0)
+    return ppt_io.getvalue()
 
 
 # ============================================================
@@ -190,18 +221,18 @@ if uploaded_file is not None:
         detected_colors = extract_accurate_colors(img)
         color_parts_map = detect_parts_per_color(detected_colors)
 
-        st.sidebar.header("⚙️ Component Settings")
+        st.sidebar.header("⚙️ Native Transition Configuration")
         color_sentences = {}
 
         if color_parts_map:
-            st.sidebar.write("Customize labels for each color category:")
+            st.sidebar.write("Customize text annotations per shape:")
             color_order = list(color_parts_map.keys())
 
             for color_name, parts in color_parts_map.items():
-                with st.sidebar.expander(f"Color: {color_name} ({len(parts)} objects)"):
+                with st.sidebar.expander(f"Color: {color_name} ({len(parts)} elements)"):
                     sentence_input = st.text_input(
-                        "Description",
-                        value=f"Component description for {color_name}.",
+                        "Transition / Explanation Note",
+                        value=f"Description and animation notes for {color_name}.",
                         key=f"sentence_{color_name}"
                     )
                     color_sentences[color_name] = sentence_input
@@ -211,39 +242,39 @@ if uploaded_file is not None:
 
         col1, col2 = st.columns(2)
         with col1:
-            st.subheader("Original Diagram Reference")
+            st.subheader("Original Diagram")
             st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
         with col2:
-            st.subheader("Isolated Moveable Shapes Preview")
+            st.subheader("Detected Native Elements Preview")
             preview = img.copy()
-            total_shapes = 0
+            total_elements = 0
 
             for color_name, parts in color_parts_map.items():
-                total_shapes += len(parts)
+                total_elements += len(parts)
                 for p in parts:
                     xmin, ymin, xmax, ymax = p["bbox"]
-                    cv2.rectangle(preview, (xmin, ymin), (xmax, ymax), (0, 255, 0), 1)
+                    cv2.rectangle(preview, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
 
             st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), use_container_width=True)
-            st.caption(f"Successfully isolated {total_shapes} independent movable objects.")
+            st.caption(f"Mapped {total_elements} native editable elements.")
 
         st.markdown("---")
 
-        render_btn = st.button("🧩 Download Exact Movable Shapes Package (.zip)", type="primary", disabled=(len(color_parts_map) == 0))
+        render_btn = st.button("📊 Export Native Editable PowerPoint (.pptx)", type="primary", disabled=(len(color_parts_map) == 0))
 
         if render_btn:
-            with st.spinner("Extracting pixel-perfect transparent shapes..."):
-                zip_bytes = generate_exact_shapes_zip(img, color_parts_map, color_sentences, color_order)
+            with st.spinner("Generating native PowerPoint shapes and text boxes..."):
+                ppt_bytes = generate_native_editable_powerpoint(img, color_parts_map, color_sentences, color_order)
 
-            st.subheader("📁 Ready for PowerPoint")
-            st.success("Package created successfully! Download below.")
+            st.subheader("📁 Presentation Ready")
+            st.success("PowerPoint generated successfully! Every shape and text box is now native and ready for transitions/animations.")
 
             st.download_button(
-                label="Download ZIP Package",
-                data=zip_bytes,
-                file_name="exact_movable_diagram_shapes.zip",
-                mime="application/zip",
+                label="Download Native PowerPoint Presentation (.pptx)",
+                data=ppt_bytes,
+                file_name="native_animatable_diagram.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
 
     except Exception as e:
