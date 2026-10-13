@@ -3,21 +3,21 @@ import math
 import cv2
 import numpy as np
 import streamlit as st
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 
 st.set_page_config(
-    page_title="Scientific Diagram to PowerPoint Converter",
+    page_title="Scientific Diagram to Movable PPTX Objects",
     page_icon="📊",
     layout="wide",
 )
 
-st.title("📊 Scientific Diagram to PowerPoint Converter")
+st.title("📊 Scientific Diagram to Movable PowerPoint Objects")
 st.write(
-    "Upload a scientific diagram or illustration. The tool recognizes shapes based on colors "
-    "and exports them into an editable PowerPoint presentation format (.pptx) along with their captions."
+    "Upload a scientific diagram. The tool breaks down every detected shape into an independent, "
+    "movable object in PowerPoint, along with movable text boxes for your captions."
 )
 
 # ============================================================
@@ -54,7 +54,7 @@ def extract_accurate_colors(image):
         pixel_count = cv2.countNonZero(combined_mask)
         coverage = (pixel_count / total_pixels) * 100
 
-        if coverage > 0.08:  # Ignore tiny speckles
+        if coverage > 0.08:
             detected.append({
                 "name": name,
                 "coverage": coverage,
@@ -88,21 +88,10 @@ def detect_parts_per_color(detected_colors):
             if len(xs) < 10:
                 continue
 
-            base_y = float(np.max(ys))
-            base_x = float(np.mean(xs[ys == int(base_y)]))
-
-            tip_y = float(np.min(ys))
-            tip_x = float(np.mean(xs[ys == int(tip_y)]))
-
-            length = max(10.0, float(math.hypot(tip_x - base_x, tip_y - base_y)))
-            expanded = cv2.dilate(comp, np.ones((5, 5), np.uint8), iterations=1)
-
             parts.append({
-                "mask": expanded > 0,
-                "base": (base_x, base_y),
-                "tip": (tip_x, tip_y),
+                "mask": comp > 0,
+                "bbox": (int(np.min(xs)), int(np.min(ys)), int(np.max(xs)), int(np.max(ys))),
                 "center": (float(np.mean(xs)), float(np.mean(ys))),
-                "length": length,
                 "area": area,
             })
 
@@ -112,84 +101,95 @@ def detect_parts_per_color(detected_colors):
     return color_parts_map
 
 
-def generate_powerpoint(img, color_parts_map, color_sentences, color_order):
-    """Generates a PowerPoint presentation containing the diagram and separated component details."""
+def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, color_order):
+    """Generates a PPTX where every shape and text box is an independent, movable object."""
     prs = Presentation()
-    
-    # Slide 1: Title & Full Diagram Overview with all captions
-    blank_slide_layout = prs.slide_layouts[6]
-    slide = prs.slides.add_slide(blank_slide_layout)
+    prs.slide_width = Inches(13.333)  # Widescreen format
+    prs.slide_height = Inches(7.5)
 
-    # Save original image temporarily to insert into PPT
-    temp_img_path = "temp_diagram.png"
-    cv2.imwrite(temp_img_path, img)
+    blank_layout = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(blank_layout)
 
-    # Add Diagram Image on Left Side
-    slide.shapes.add_picture(temp_img_path, Inches(0.8), Inches(1.0), width=Inches(5.0))
+    img_h, img_w = img.shape[:2]
 
-    # Add Title
-    title_box = slide.shapes.add_textbox(Inches(6.2), Inches(0.8), Inches(6.5), Inches(0.8))
-    tf = title_box.text_frame
-    tf.word_wrap = True
-    p = tf.paragraphs[0]
-    p.text = "Scientific Diagram Analysis"
-    p.font.size = Pt(24)
-    p.font.bold = True
-    p.font.color.rgb = RGBColor(30, 30, 30)
+    # Canvas mapping dimensions on PowerPoint (Left side area for shapes)
+    canvas_left = Inches(0.8)
+    canvas_top = Inches(1.0)
+    canvas_max_width = Inches(7.0)
+    canvas_max_height = Inches(6.0)
 
-    # Add Component Sentences / Descriptions as Editable Text Boxes on Right Side
-    top_offset = Inches(1.8)
+    # Calculate scaling factor to fit diagram nicely while keeping relative positions
+    scale = min(canvas_max_width / img_w, canvas_max_height / img_h)
+
+    # 1. Add each detected shape as an individual transparent movable picture object
+    part_counter = 0
     for color_name in color_order:
         if color_name not in color_parts_map:
             continue
+        
+        for idx, part in enumerate(color_parts_map[color_name]):
+            xmin, ymin, xmax, ymax = part["bbox"]
+            
+            # Add padding
+            pad = 4
+            xmin = max(0, xmin - pad)
+            ymin = max(0, ymin - pad)
+            xmax = min(img_w - 1, xmax + pad)
+            ymax = min(img_h - 1, ymax + pad)
+
+            # Crop the bounding box region
+            cropped_bgr = img[ymin:ymax+1, xmin:xmax+1]
+            cropped_mask = part["mask"][ymin:ymax+1, xmin:xmax+1]
+
+            # Create RGBA image with transparent background outside the shape mask
+            bgra = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2BGRA)
+            bgra[~cropped_mask, 3] = 0  # Set alpha to 0 (transparent)
+
+            # Save temporary transparent part image
+            part_img_path = f"temp_shape_{color_name}_{idx}.png"
+            pil_part = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
+            pil_part.save(part_img_path)
+
+            # Compute PowerPoint coordinates for this movable shape
+            p_left = canvas_left + Inches(xmin * scale)
+            p_top = canvas_top + Inches(ymin * scale)
+            p_width = Inches((xmax - xmin) * scale)
+            p_height = Inches((ymax - ymin) * scale)
+
+            # Add as independent picture object
+            slide.shapes.add_picture(part_img_path, p_left, p_top, width=p_width, height=p_height)
+            part_counter += 1
+
+    # 2. Add movable text boxes on the right side for each color category
+    text_left = Inches(8.5)
+    text_top = Inches(1.0)
+    text_width = Inches(4.3)
+
+    for color_name in color_order:
+        if color_name not in color_parts_map:
+            continue
+        
         sentence = color_sentences.get(color_name, f"Component: {color_name}")
-        
-        box = slide.shapes.add_textbox(Inches(6.2), top_offset, Inches(6.5), Inches(0.9))
-        box_tf = box.text_frame
-        box_tf.word_wrap = True
-        
-        p_head = box_tf.paragraphs[0]
-        p_head.text = f"• [{color_name}]"
+
+        # Create an independent movable text box
+        box = slide.shapes.add_textbox(text_left, text_top, text_width, Inches(1.2))
+        tf = box.text_frame
+        tf.word_wrap = True
+
+        p_head = tf.paragraphs[0]
+        p_head.text = f"■ {color_name} Region"
         p_head.font.size = Pt(14)
         p_head.font.bold = True
         p_head.font.color.rgb = RGBColor(0, 102, 204)
 
-        p_desc = box_tf.add_paragraph()
+        p_desc = tf.add_paragraph()
         p_desc.text = sentence
         p_desc.font.size = Pt(13)
-        p_desc.font.color.rgb = RGBColor(50, 50, 50)
+        p_desc.font.color.rgb = RGBColor(40, 40, 40)
 
-        top_offset += Inches(1.0)
+        text_top += Inches(1.3)
 
-    # Slide 2+: Individual breakdown per detected color region
-    for color_name in color_order:
-        if color_name not in color_parts_map:
-            continue
-        
-        detail_slide = prs.slides.add_slide(blank_slide_layout)
-        
-        # Section Title
-        d_title_box = detail_slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.5), Inches(0.8))
-        dtf = d_title_box.text_frame
-        dp = dtf.paragraphs[0]
-        dp.text = f"Component Focus: {color_name}"
-        dp.font.size = Pt(22)
-        dp.font.bold = True
-        dp.font.color.rgb = RGBColor(0, 102, 204)
-
-        # Editable text area for detailed notes / sentences
-        note_box = detail_slide.shapes.add_textbox(Inches(0.8), Inches(1.6), Inches(11.5), Inches(1.5))
-        ntf = note_box.text_frame
-        ntf.word_wrap = True
-        np_main = ntf.paragraphs[0]
-        np_main.text = color_sentences.get(color_name, "")
-        np_main.font.size = Pt(16)
-        np_main.font.color.rgb = RGBColor(40, 40, 40)
-
-        # Add image reminder on slide
-        detail_slide.shapes.add_picture(temp_img_path, Inches(0.8), Inches(3.4), width=Inches(4.5))
-
-    # Save presentation to memory buffer
+    # Save presentation to buffer
     ppt_io = io.BytesIO()
     prs.save(ppt_io)
     ppt_io.seek(0)
@@ -213,24 +213,24 @@ if uploaded_file is not None:
 
         h, w = img.shape[:2]
         if max(h, w) > 1000:
-            scale = 1000.0 / max(h, w)
-            img = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
+            scale_val = 1000.0 / max(h, w)
+            img = cv2.resize(img, (int(w * scale_val), int(h * scale_val)), interpolation=cv2.INTER_AREA)
 
         detected_colors = extract_accurate_colors(img)
         color_parts_map = detect_parts_per_color(detected_colors)
 
-        st.sidebar.header("⚙️ PowerPoint Configuration Dashboard")
+        st.sidebar.header("⚙️ Movable Objects Configuration")
         color_sentences = {}
 
         if color_parts_map:
-            st.sidebar.write("Customize sentences / labels per detected color region:")
+            st.sidebar.write("Customize movable text annotations per color region:")
             color_order = list(color_parts_map.keys())
 
             for color_name, parts in color_parts_map.items():
-                with st.sidebar.expander(f"Color: {color_name} ({len(parts)} regions)"):
+                with st.sidebar.expander(f"Color: {color_name} ({len(parts)} shapes)"):
                     sentence_input = st.text_input(
-                        "Caption / Explanation Sentence",
-                        value=f"Description for component: {color_name}",
+                        "Caption / Explanation",
+                        value=f"Detailed notes for {color_name} component.",
                         key=f"sentence_{color_name}"
                     )
                     color_sentences[color_name] = sentence_input
@@ -244,32 +244,34 @@ if uploaded_file is not None:
             st.image(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), use_container_width=True)
 
         with col2:
-            st.subheader("Detected Scientific Color Regions")
+            st.subheader("Detected Movable Shapes")
             preview = img.copy()
+            total_shapes = 0
 
             for color_name, parts in color_parts_map.items():
+                total_shapes += len(parts)
                 for p in parts:
-                    cv2.circle(preview, (int(p["base"][0]), int(p["base"][1])), 6, (0, 255, 0), -1)
-                    cv2.circle(preview, (int(p["tip"][0]), int(p["tip"][1])), 4, (0, 0, 255), -1)
-                    cv2.line(preview, (int(p["base"][0]), int(p["base"][1])), (int(p["tip"][0]), int(p["tip"][1])), (255, 255, 0), 2)
+                    xmin, ymin, xmax, ymax = p["bbox"]
+                    cv2.rectangle(preview, (xmin, ymin), (xmax, ymax), (0, 255, 0), 2)
 
             st.image(cv2.cvtColor(preview, cv2.COLOR_BGR2RGB), use_container_width=True)
+            st.caption(f"Total individual shapes isolated: {total_shapes}")
 
         st.markdown("---")
 
-        render_btn = st.button("📊 Export to PowerPoint (.pptx)", type="primary", disabled=(len(color_parts_map) == 0))
+        render_btn = st.button("📊 Export Movable Objects to PowerPoint (.pptx)", type="primary", disabled=(len(color_parts_map) == 0))
 
         if render_btn:
-            with st.spinner("Generating PowerPoint presentation with editable shapes and captions..."):
-                ppt_bytes = generate_powerpoint(img, color_parts_map, color_sentences, color_order)
+            with st.spinner("Isolating shapes, generating transparent layers, and building PowerPoint..."):
+                ppt_bytes = generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, color_order)
 
-            st.subheader("📁 PowerPoint Export Ready")
-            st.success("Presentation generated successfully! You can now download and freely edit text and elements.")
+            st.subheader("📁 Presentation Ready")
+            st.success("PowerPoint generated! Every shape and text box is now a separate, fully movable object.")
 
             st.download_button(
                 label="Download PowerPoint Presentation (.pptx)",
                 data=ppt_bytes,
-                file_name="scientific_diagram_presentation.pptx",
+                file_name="movable_scientific_shapes.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
 
