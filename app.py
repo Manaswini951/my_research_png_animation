@@ -4,17 +4,20 @@ import cv2
 import numpy as np
 import streamlit as st
 from PIL import Image, ImageDraw, ImageFont
+from pptx import Presentation
+from pptx.util import Inches, Pt
+from pptx.dml.color import RGBColor
 
 st.set_page_config(
-    page_title="Scientific Color-Motion Animation Studio",
-    page_icon="🔬",
+    page_title="Scientific Diagram to PowerPoint Converter",
+    page_icon="📊",
     layout="wide",
 )
 
-st.title("🔬 Scientific Color-Motion Animation Studio")
+st.title("📊 Scientific Diagram to PowerPoint Converter")
 st.write(
-    "Upload a scientific diagram or illustration. Assign scientific animation behaviors "
-    "to each detected color marker (e.g., Fade-in sequence, Label annotation, Pulsing highlight, Structural shift)."
+    "Upload a scientific diagram or illustration. The tool recognizes shapes based on colors "
+    "and exports them into an editable PowerPoint presentation format (.pptx) along with their captions."
 )
 
 # ============================================================
@@ -34,15 +37,6 @@ COLOR_RANGES = {
     "Purple / Violet": [(np.array([131, 50, 40]), np.array([155, 255, 255]))],
     "Pink / Magenta": [(np.array([156, 50, 40]), np.array([171, 255, 255]))],
 }
-
-ALL_MOTIONS = [
-    "None (Static)",
-    "Gradual Fade-In (Sequential Assembly)",
-    "Subtle Focus Pulse",
-    "Linear Translation / Slide",
-    "Continuous Slow Rotation",
-    "Steady Growth / Expansion",
-]
 
 
 def extract_accurate_colors(image):
@@ -118,109 +112,88 @@ def detect_parts_per_color(detected_colors):
     return color_parts_map
 
 
-def apply_scientific_motion(map_x, map_y, grid_x, grid_y, parts, motion_type, frame_index, total_frames, intensity, image_shape):
-    """Applies scientific/technical motion deformations onto given part masks."""
-    if motion_type == "None (Static)" or not parts:
-        return
-
-    phase = 2.0 * math.pi * float(frame_index) / float(total_frames)
-    sine = math.sin(phase)
-    h, w = image_shape[:2]
-
-    for part in parts:
-        mask = part["mask"]
-        cx, cy = part["center"]
-
-        if motion_type == "Subtle Focus Pulse":
-            scale_delta = sine * (intensity / 100.0) * 0.15
-            dx = (grid_x - cx) * scale_delta
-            dy = (grid_y - cy) * scale_delta
-            map_x[mask] -= dx[mask]
-            map_y[mask] -= dy[mask]
-
-        elif motion_type == "Linear Translation / Slide":
-            dx = sine * (intensity * 0.5)
-            map_x[mask] -= dx
-
-        elif motion_type == "Continuous Slow Rotation":
-            angle = (float(frame_index) / total_frames) * 0.05 * (intensity / 10.0)
-            cos_a, sin_a = math.cos(angle), math.sin(angle)
-            orig_x = grid_x[mask] - cx
-            orig_y = grid_y[mask] - cy
-            rot_x = orig_x * cos_a - orig_y * sin_a + cx
-            rot_y = orig_x * sin_a + orig_y * cos_a + cy
-            map_x[mask] = rot_x
-            map_y[mask] = rot_y
-
-        elif motion_type == "Steady Growth / Expansion":
-            growth = (float(frame_index) / total_frames) * (intensity * 0.05)
-            dx = (grid_x - cx) * growth
-            dy = (grid_y - cy) * growth
-            map_x[mask] -= dx[mask]
-            map_y[mask] -= dy[mask]
-
-
-def animate_frame_scientific(original, color_parts_map, color_motion_assignments, color_order, frame_index, total_frames, intensity):
-    """Combines scientific animations including blank-white start and sequential assembly with captions."""
-    h, w = original.shape[:2]
+def generate_powerpoint(img, color_parts_map, color_sentences, color_order):
+    """Generates a PowerPoint presentation containing the diagram and separated component details."""
+    prs = Presentation()
     
-    # 1. Blank white background start
-    canvas = np.ones_like(original) * 255
+    # Slide 1: Title & Full Diagram Overview with all captions
+    blank_slide_layout = prs.slide_layouts[6]
+    slide = prs.slides.add_slide(blank_slide_layout)
 
-    grid_x, grid_y = np.meshgrid(np.arange(w, dtype=np.float32), np.arange(h, dtype=np.float32))
-    map_x = grid_x.copy()
-    map_y = grid_y.copy()
+    # Save original image temporarily to insert into PPT
+    temp_img_path = "temp_diagram.png"
+    cv2.imwrite(temp_img_path, img)
 
-    # Track cumulative frames for sequential appearance
-    accumulated_frames = 0
-    active_colors_data = []
+    # Add Diagram Image on Left Side
+    slide.shapes.add_picture(temp_img_path, Inches(0.8), Inches(1.0), width=Inches(5.0))
 
-    for idx, color_name in enumerate(color_order):
+    # Add Title
+    title_box = slide.shapes.add_textbox(Inches(6.2), Inches(0.8), Inches(6.5), Inches(0.8))
+    tf = title_box.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.text = "Scientific Diagram Analysis"
+    p.font.size = Pt(24)
+    p.font.bold = True
+    p.font.color.rgb = RGBColor(30, 30, 30)
+
+    # Add Component Sentences / Descriptions as Editable Text Boxes on Right Side
+    top_offset = Inches(1.8)
+    for color_name in color_order:
         if color_name not in color_parts_map:
             continue
-        parts = color_parts_map[color_name]
-        motion = color_motion_assignments.get(color_name, "None (Static)")
+        sentence = color_sentences.get(color_name, f"Component: {color_name}")
         
-        # Each color appears sequentially based on order
-        item_start_frame = accumulated_frames
-        item_duration = total_frames // max(1, len(color_order))
-        accumulated_frames += item_duration
+        box = slide.shapes.add_textbox(Inches(6.2), top_offset, Inches(6.5), Inches(0.9))
+        box_tf = box.text_frame
+        box_tf.word_wrap = True
+        
+        p_head = box_tf.paragraphs[0]
+        p_head.text = f"• [{color_name}]"
+        p_head.font.size = Pt(14)
+        p_head.font.bold = True
+        p_head.font.color.rgb = RGBColor(0, 102, 204)
 
-        if frame_index >= item_start_frame:
-            local_frame_idx = frame_index - item_start_frame
-            
-            # Apply motion
-            apply_scientific_motion(map_x, map_y, grid_x, grid_y, parts, motion, local_frame_idx, total_frames, intensity, (h, w))
-            
-            # Calculate fade-in alpha if Gradual Fade-In is selected
-            alpha = 1.0
-            if motion == "Gradual Fade-In (Sequential Assembly)":
-                fade_frames = max(1, item_duration // 2)
-                alpha = min(1.0, float(local_frame_idx) / float(fade_frames))
+        p_desc = box_tf.add_paragraph()
+        p_desc.text = sentence
+        p_desc.font.size = Pt(13)
+        p_desc.font.color.rgb = RGBColor(50, 50, 50)
 
-            active_colors_data.append((parts, alpha))
+        top_offset += Inches(1.0)
 
-    # Perform remapping for active parts
-    warped = cv2.remap(original, map_x, map_y, interpolation=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    # Slide 2+: Individual breakdown per detected color region
+    for color_name in color_order:
+        if color_name not in color_parts_map:
+            continue
+        
+        detail_slide = prs.slides.add_slide(blank_slide_layout)
+        
+        # Section Title
+        d_title_box = detail_slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(11.5), Inches(0.8))
+        dtf = d_title_box.text_frame
+        dp = dtf.paragraphs[0]
+        dp.text = f"Component Focus: {color_name}"
+        dp.font.size = Pt(22)
+        dp.font.bold = True
+        dp.font.color.rgb = RGBColor(0, 102, 204)
 
-    # Composite onto blank white background with proper alpha blending for fade-ins
-    final_frame = np.ones_like(original) * 255
-    for parts, alpha in active_colors_data:
-        for p in parts:
-            mask = p["mask"]
-            if alpha >= 1.0:
-                final_frame[mask] = warped[mask]
-            else:
-                final_frame[mask] = cv2.addWeighted(np.ones_like(original)[mask] * 255, 1.0 - alpha, warped[mask], alpha, 0)
+        # Editable text area for detailed notes / sentences
+        note_box = detail_slide.shapes.add_textbox(Inches(0.8), Inches(1.6), Inches(11.5), Inches(1.5))
+        ntf = note_box.text_frame
+        ntf.word_wrap = True
+        np_main = ntf.paragraphs[0]
+        np_main.text = color_sentences.get(color_name, "")
+        np_main.font.size = Pt(16)
+        np_main.font.color.rgb = RGBColor(40, 40, 40)
 
-    return final_frame
+        # Add image reminder on slide
+        detail_slide.shapes.add_picture(temp_img_path, Inches(0.8), Inches(3.4), width=Inches(4.5))
 
-
-def build_gif(frames, duration=50):
-    buf = io.BytesIO()
-    prepared = [f.convert("P", palette=Image.ADAPTIVE) for f in frames]
-    prepared[0].save(buf, format="GIF", save_all=True, append_images=prepared[1:], duration=duration, loop=0)
-    return buf.getvalue()
+    # Save presentation to memory buffer
+    ppt_io = io.BytesIO()
+    prs.save(ppt_io)
+    ppt_io.seek(0)
+    return ppt_io.getvalue()
 
 
 # ============================================================
@@ -246,37 +219,24 @@ if uploaded_file is not None:
         detected_colors = extract_accurate_colors(img)
         color_parts_map = detect_parts_per_color(detected_colors)
 
-        st.sidebar.header("⚙️ Scientific Animation Dashboard")
-        color_motion_assignments = {}
+        st.sidebar.header("⚙️ PowerPoint Configuration Dashboard")
         color_sentences = {}
 
         if color_parts_map:
-            st.sidebar.write("Configure motion and appearance text per detected color region:")
-            
+            st.sidebar.write("Customize sentences / labels per detected color region:")
             color_order = list(color_parts_map.keys())
 
             for color_name, parts in color_parts_map.items():
                 with st.sidebar.expander(f"Color: {color_name} ({len(parts)} regions)"):
-                    selected_motion = st.selectbox(
-                        "Behavior",
-                        ALL_MOTIONS,
-                        index=1, # Default to Gradual Fade-In for scientific assembly
-                        key=f"motion_{color_name}",
-                    )
-                    color_motion_assignments[color_name] = selected_motion
-
                     sentence_input = st.text_input(
                         "Caption / Explanation Sentence",
-                        value=f"Showing component: {color_name}",
+                        value=f"Description for component: {color_name}",
                         key=f"sentence_{color_name}"
                     )
                     color_sentences[color_name] = sentence_input
         else:
             st.sidebar.warning("No distinct colored markers detected.")
             color_order = []
-
-        intensity = float(st.sidebar.slider("Animation Intensity / Speed", 4, 30, 10))
-        pause_duration = st.sidebar.slider("Delay / Pause Time between appearances (ms)", 100, 2000, 500, step=100)
 
         col1, col2 = st.columns(2)
         with col1:
@@ -297,43 +257,20 @@ if uploaded_file is not None:
 
         st.markdown("---")
 
-        render_btn = st.button("🔬 Render Scientific Animation", type="primary", disabled=(len(color_parts_map) == 0))
+        render_btn = st.button("📊 Export to PowerPoint (.pptx)", type="primary", disabled=(len(color_parts_map) == 0))
 
         if render_btn:
-            with st.spinner("Rendering blank-white start, sequential assembly, and scientific annotations..."):
-                frames = []
-                total_frames = 24
-                for i in range(total_frames):
-                    warped = animate_frame_scientific(img, color_parts_map, color_motion_assignments, color_order, i, total_frames, intensity)
-                    
-                    # Add caption overlay corresponding to active timeline
-                    current_color_idx = min(len(color_order) - 1, int(i / (total_frames / max(1, len(color_order)))))
-                    active_color = color_order[current_color_idx] if color_order else ""
-                    caption_text = color_sentences.get(active_color, "")
+            with st.spinner("Generating PowerPoint presentation with editable shapes and captions..."):
+                ppt_bytes = generate_powerpoint(img, color_parts_map, color_sentences, color_order)
 
-                    # Draw text overlay using PIL
-                    pil_img = Image.fromarray(np.ascontiguousarray(cv2.cvtColor(warped, cv2.COLOR_BGR2RGB)))
-                    draw = ImageDraw.Draw(pil_img)
-                    if caption_text:
-                        draw.rectangle([(10, h - 45), (w - 10, h - 10)], fill=(240, 240, 240, 230))
-                        draw.text((20, h - 38), caption_text, fill=(20, 20, 20))
-
-                    frames.append(pil_img)
-
-                frame_duration = int(pause_duration / max(1, len(color_order)))
-                gif_bytes = build_gif(frames, duration=max(40, frame_duration))
-
-            st.subheader("🎬 Scientific Animation Result")
-            st.image(gif_bytes, width=600)
-            
-            summary_str = " → ".join([f"**{c}**: {color_sentences.get(c, '')}" for c in color_order])
-            st.caption(f"Sequential Animation Flow: {summary_str}")
+            st.subheader("📁 PowerPoint Export Ready")
+            st.success("Presentation generated successfully! You can now download and freely edit text and elements.")
 
             st.download_button(
-                "Download Scientific Animation GIF",
-                data=gif_bytes,
-                file_name="scientific_diagram_animation.gif",
-                mime="image/gif",
+                label="Download PowerPoint Presentation (.pptx)",
+                data=ppt_bytes,
+                file_name="scientific_diagram_presentation.pptx",
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
             )
 
     except Exception as e:
