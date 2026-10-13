@@ -1,5 +1,6 @@
 import io
 import math
+import os
 import cv2
 import numpy as np
 import streamlit as st
@@ -121,12 +122,16 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
     # Calculate scaling factor to fit diagram nicely while keeping relative positions
     scale = min(canvas_max_width / img_w, canvas_max_height / img_h)
 
+    # Keep track of temporary files for clean up
+    temp_files = []
+
     # 1. Add each detected shape as an individual transparent movable picture object
-    part_counter = 0
     for color_name in color_order:
         if color_name not in color_parts_map:
             continue
         
+        safe_color_name = color_name.replace(" / ", "_").replace(" ", "_")
+
         for idx, part in enumerate(color_parts_map[color_name]):
             xmin, ymin, xmax, ymax = part["bbox"]
             
@@ -145,8 +150,10 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
             bgra = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2BGRA)
             bgra[~cropped_mask, 3] = 0  # Set alpha to 0 (transparent)
 
-            # Save temporary transparent part image
-            part_img_path = f"temp_shape_{color_name}_{idx}.png"
+            # Save temporary transparent part image with safe filename
+            part_img_path = f"temp_shape_{safe_color_name}_{idx}.png"
+            temp_files.append(part_img_path)
+            
             pil_part = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
             pil_part.save(part_img_path)
 
@@ -158,7 +165,6 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
 
             # Add as independent picture object
             slide.shapes.add_picture(part_img_path, p_left, p_top, width=p_width, height=p_height)
-            part_counter += 1
 
     # 2. Add movable text boxes on the right side for each color category
     text_left = Inches(8.5)
@@ -193,6 +199,15 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
     ppt_io = io.BytesIO()
     prs.save(ppt_io)
     ppt_io.seek(0)
+
+    # Clean up temp shape files
+    for fpath in temp_files:
+        if os.path.exists(fpath):
+            try:
+                os.remove(fpath)
+            except:
+                pass
+
     return ppt_io.getvalue()
 
 
