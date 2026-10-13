@@ -1,6 +1,5 @@
 import io
 import math
-import os
 import cv2
 import numpy as np
 import streamlit as st
@@ -103,7 +102,7 @@ def detect_parts_per_color(detected_colors):
 
 
 def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, color_order):
-    """Generates a PPTX where every shape and text box is an independent, movable object."""
+    """Generates a PPTX where every shape and text box is an independent, movable object using in-memory streams."""
     prs = Presentation()
     prs.slide_width = Inches(13.333)  # Widescreen format
     prs.slide_height = Inches(7.5)
@@ -122,17 +121,12 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
     # Calculate scaling factor to fit diagram nicely while keeping relative positions
     scale = min(canvas_max_width / img_w, canvas_max_height / img_h)
 
-    # Keep track of temporary files for clean up
-    temp_files = []
-
-    # 1. Add each detected shape as an individual transparent movable picture object
+    # 1. Add each detected shape as an individual transparent movable picture object via in-memory stream
     for color_name in color_order:
         if color_name not in color_parts_map:
             continue
         
-        safe_color_name = color_name.replace(" / ", "_").replace(" ", "_")
-
-        for idx, part in enumerate(color_parts_map[color_name]):
+        for part in color_parts_map[color_name]:
             xmin, ymin, xmax, ymax = part["bbox"]
             
             # Add padding
@@ -150,12 +144,13 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
             bgra = cv2.cvtColor(cropped_bgr, cv2.COLOR_BGR2BGRA)
             bgra[~cropped_mask, 3] = 0  # Set alpha to 0 (transparent)
 
-            # Save temporary transparent part image with safe filename
-            part_img_path = f"temp_shape_{safe_color_name}_{idx}.png"
-            temp_files.append(part_img_path)
-            
+            # Convert to PIL Image
             pil_part = Image.fromarray(cv2.cvtColor(bgra, cv2.COLOR_BGRA2RGBA))
-            pil_part.save(part_img_path)
+
+            # Save into an in-memory byte buffer (avoids file I/O errors and corruption)
+            img_stream = io.BytesIO()
+            pil_part.save(img_stream, format="PNG")
+            img_stream.seek(0)
 
             # Compute PowerPoint coordinates for this movable shape
             p_left = canvas_left + Inches(xmin * scale)
@@ -163,8 +158,8 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
             p_width = Inches((xmax - xmin) * scale)
             p_height = Inches((ymax - ymin) * scale)
 
-            # Add as independent picture object
-            slide.shapes.add_picture(part_img_path, p_left, p_top, width=p_width, height=p_height)
+            # Add as independent picture object from memory stream
+            slide.shapes.add_picture(img_stream, p_left, p_top, width=p_width, height=p_height)
 
     # 2. Add movable text boxes on the right side for each color category
     text_left = Inches(8.5)
@@ -199,15 +194,6 @@ def generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, c
     ppt_io = io.BytesIO()
     prs.save(ppt_io)
     ppt_io.seek(0)
-
-    # Clean up temp shape files
-    for fpath in temp_files:
-        if os.path.exists(fpath):
-            try:
-                os.remove(fpath)
-            except:
-                pass
-
     return ppt_io.getvalue()
 
 
@@ -277,11 +263,11 @@ if uploaded_file is not None:
         render_btn = st.button("📊 Export Movable Objects to PowerPoint (.pptx)", type="primary", disabled=(len(color_parts_map) == 0))
 
         if render_btn:
-            with st.spinner("Isolating shapes, generating transparent layers, and building PowerPoint..."):
+            with st.spinner("Isolating shapes into memory streams and building PowerPoint..."):
                 ppt_bytes = generate_movable_objects_powerpoint(img, color_parts_map, color_sentences, color_order)
 
             st.subheader("📁 Presentation Ready")
-            st.success("PowerPoint generated! Every shape and text box is now a separate, fully movable object.")
+            st.success("PowerPoint generated successfully! You can now download and open it without errors.")
 
             st.download_button(
                 label="Download PowerPoint Presentation (.pptx)",
